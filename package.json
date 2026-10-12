@@ -1,7 +1,7 @@
 {
   "name": "tao",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +9,10 @@
     "check": "tsc --noEmit && cargo check --manifest-path src-tauri/Cargo.toml",
     "preview": "vite preview",
     "tao:prepare": "node scripts/prepare-tauri-release.mjs",
+    "tao:verify": "node scripts/verify-tauri-release.mjs",
     "tao:release": "node scripts/release-tauri.mjs",
     "tao:release:nsis": "node scripts/release-tauri.mjs --bundles nsis",
-    "tauri": "tauri"
+    "tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-cli.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

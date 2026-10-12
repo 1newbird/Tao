@@ -1,6 +1,6 @@
 # Tao
 
-Tao 是一个 Windows x64 桌面 AI Agent 工作台，使用 Tauri 作为桌面壳，内置并复用 Pi 作为 Agent 引擎。
+Tao 是一个面向 Windows 10/11 x64 的桌面 AI Agent 工作台，使用 Tauri 作为桌面壳，内置并复用 Pi 作为 Agent 引擎。
 
 ```text
 Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Pi Agent 内核
@@ -22,27 +22,26 @@ Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Pi Agent 内核
 核心要求：
 
 - Windows x64
-- Node.js 22 LTS 和 npm
+- Node.js 22.19.0 或更高版本和 npm（脚本在缺失时安装 Node 22.19.0）
 - Rust stable，默认工具链为 `x86_64-pc-windows-msvc`
-- Visual Studio 2022 Build Tools 的“使用 C++ 的桌面开发”工作负载
+- Visual Studio C++ Build Tools（2022 或兼容的较新版本）及 Windows SDK
 - Windows WebView2 Runtime
 - PowerShell
 
 ## 快速开始
 
-克隆项目后，在 PowerShell 中执行：
+克隆项目后，推荐在 PowerShell 中从仓库根目录执行：
 
 ```powershell
-cd <Tao 项目根目录>
-npm.cmd install
-
-Set-Location vendor\pi
-npm.cmd install --ignore-scripts
-Set-Location ..\..
-
-npm.cmd run check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1
 npm.cmd run tauri dev
 ```
+
+`setup-dev.ps1` 检查并补齐开发环境，优先把新安装的便携 Node、Rust 工具链和 npm 缓存放到 `D:\TaoDev`；已有合格组件直接复用。脚本完成后运行 TypeScript、Rust 和 Pi 工作区验证。`npm.cmd run tauri dev` 会读取脚本保存的工具路径，因此不要求全局修改 PATH；也可以运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\tao.ps1 dev`。无 D 盘时使用 `%LOCALAPPDATA%\TaoDev`；可通过 `-ToolsRoot` 指定其他位置。仅检查、不安装可加 `-CheckOnly`。
+
+手动安装 Node、Rust 和项目依赖的分步说明见环境手册。注意 Pi 源码快照不跟踪生成的模型目录数据；一键脚本会从相同版本的 Pi npm 发布包取得固定数据，并校验其结构。
+
+脚本还支持 `tao.ps1 check` 和 `tao.ps1 release`。首次安装 C++ Build Tools 可能要求管理员授权或重启；重启后重新运行准备脚本即可。完整说明见[从零开始配置开发环境](docs/项目手册/03a-从零开始配置开发环境.md)。
 
 `npm.cmd run check` 会执行：
 
@@ -62,6 +61,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 | `npm.cmd run build` | 构建前端 |
 | `npm.cmd run tauri dev` | 启动完整 Tauri 开发模式 |
 | `npm.cmd run tao:prepare` | 生成发布资源，不打安装包 |
+| `npm.cmd run tao:verify` | 用内置 Node 验证发布 Runtime 的 `ready` 和请求响应 |
 | `npm.cmd run tao:release` | 生成 Windows x64 MSI |
 | `npm.cmd run tao:release:nsis` | 单独尝试生成 NSIS 安装包 |
 
@@ -100,6 +100,8 @@ npm.cmd run tao:release
 ```text
 src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
 ```
+
+发布命令会自动准备并校验内置 Node、Pi 和 Runtime，检查 MSI 文件表，并把安装包路径、大小与 SHA-256 写入 `.tao-release-cache/release-report.json`。完整步骤见[Windows x64 打包发布手册](docs/项目手册/04-Windows-x64-打包发布.md)。
 
 ## 文档
 

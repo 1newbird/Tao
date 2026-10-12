@@ -2,10 +2,14 @@ use crate::models::{FileChange, WorkspaceEntry, WorkspaceFile, WorkspaceListing}
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use tauri::{AppHandle, Manager};
 
 const MAX_DIRECTORY_ENTRIES: usize = 600;
 const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub fn list_workspace(
     app: &AppHandle,
@@ -223,9 +227,7 @@ fn git_changes(root: &Path) -> (bool, Vec<FileChange>) {
 }
 
 fn is_git_repository(root: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
+    git_command(root)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .map(|output| output.status.success())
@@ -233,9 +235,7 @@ fn is_git_repository(root: &Path) -> bool {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = git_command(root)
         .args(args)
         .output()
         .map_err(|error| format!("无法执行 Git：{error}"))?;
@@ -244,6 +244,14 @@ fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
         return Err(if stderr.is_empty() { "Git 命令执行失败".to_string() } else { stderr });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.arg("-C").arg(root);
+    command
 }
 
 fn parse_git_status_line(line: &str) -> Option<FileChange> {

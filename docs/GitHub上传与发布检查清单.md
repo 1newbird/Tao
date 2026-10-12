@@ -4,7 +4,7 @@
 
 ### 1.1 仓库状态
 
-- 确认项目根目录是 `E:\Tao\Tao` 或当前实际克隆目录。
+- 确认当前目录是 Tao 仓库根目录。
 - 确认当前目录已经 `git init`。
 - 确认 `vendor/pi` 下没有 `.git`，也没有 `.gitmodules`。
 - 确认没有把 `vendor/pi` 作为 submodule 添加。
@@ -102,13 +102,8 @@ Secret
 git clone <仓库地址> tao-clean
 Set-Location tao-clean
 
-npm.cmd install
-
-Set-Location vendor\pi
-npm.cmd install --ignore-scripts
-Set-Location ..\..
-
-npm.cmd run check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\tao.ps1 check
 npm.cmd run tauri dev
 ```
 
@@ -116,8 +111,8 @@ npm.cmd run tauri dev
 
 ## 6. 发布前检查
 
-- `npm.cmd run check` 通过。
-- `npm.cmd run tao:prepare` 可以重新生成 `src-tauri/resources`。
+- `scripts\tao.ps1 check` 通过。
+- `npm.cmd run tao:prepare` 和 `npm.cmd run tao:verify` 通过。
 - 确认 `src-tauri/resources` 没有被提交。
 - 执行：
 
@@ -132,3 +127,6 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
 ```
 
 - 确认 MSI 不包含机密配置或本地工作区数据。
+- 核对 `.tao-release-cache/release-report.json` 中的版本、MSI 路径、大小和 SHA-256。
+- 在没有开发环境的干净 Windows x64 电脑安装该 MSI，确认 Runtime 进入 `ready`，再验收模型、问答、工具、权限、会话重开及删除。
+- 完成安装验收后，上传**这次生成的 MSI**并在发布说明中附 SHA-256；不要上传 `target`、`resources` 或本地用户数据。

@@ -17,6 +17,11 @@ const nodeDownloadUrl = `https://nodejs.org/dist/v${nodeVersion}/${nodeArchiveNa
 const nodeArchivePath = join(cacheRoot, nodeArchiveName);
 const nodeExtractRoot = join(cacheRoot, `node-v${nodeVersion}-win-x64`);
 const nodeBinaryPath = join(nodeExtractRoot, "node.exe");
+const developmentOnlyNodeModules = new Set([
+  "@biomejs", "@rolldown", "@types", "@typescript",
+  "husky", "lightningcss", "lightningcss-win32-x64-msvc",
+  "shx", "typescript", "vite", "vitest", "vitest-evals",
+]);
 
 function log(message) {
   process.stdout.write(`[Tao 发布准备] ${message}\n`);
@@ -147,7 +152,7 @@ async function prepareResources() {
     filter: (source) => {
       const relativePath = relative(piNodeModules, source).split(sep).filter(Boolean);
       if (relativePath.length === 0) return true;
-      return !relativePath.includes(".cache");
+      return !relativePath.includes(".cache") && !developmentOnlyNodeModules.has(relativePath[0]);
     },
   });
 

@@ -347,12 +347,17 @@ interface RuntimeTiming {
 }
 
 interface RuntimeHostStatus {
+  phase: "stopped" | "starting" | "ready" | "failed";
   running: boolean;
   ready: boolean;
   pid: number | null;
+  exitCode: number | null;
   uptimeMs: number | null;
   sessionCount: number;
   lastError?: string | null;
+  nodePath?: string | null;
+  runtimePath?: string | null;
+  piPath?: string | null;
 }
 
 type RightPanelView = "runtime" | "files";
@@ -1678,9 +1683,11 @@ function App() {
   });
   const [resizing, setResizing] = useState(false);
   const [runtimeHost, setRuntimeHost] = useState<RuntimeHostStatus>({
+    phase: "stopped",
     running: false,
     ready: false,
     pid: null,
+    exitCode: null,
     uptimeMs: null,
     sessionCount: 0,
     lastError: null,
@@ -1956,7 +1963,7 @@ function App() {
         })
         .catch(() => {
           if (!disposed) {
-            setRuntimeHost((current) => ({ ...current, running: false, ready: false }));
+            setRuntimeHost((current) => ({ ...current, phase: "failed", running: false, ready: false }));
           }
         });
     };
@@ -2364,7 +2371,7 @@ function App() {
   const activeConversationGenerating = Boolean(generatingIds[activeId]);
   const anyConversationGenerating = Object.values(generatingIds).some(Boolean);
   const anyConversationPreparing = Object.values(preparingIds).some(Boolean);
-  const runtimeHasError = Boolean(runtimeHost.lastError) && !runtimeHost.ready;
+  const runtimeHasError = runtimeHost.phase === "failed";
   const rightPanelTraces = activeStream?.traces ?? (
     lastAssistantMessage ? (lastAssistantMessage.traces ?? messageTraces[lastAssistantMessage.id] ?? []) : []
   );
@@ -2398,6 +2405,8 @@ function App() {
   const pageSubtitle = mainView === "chat"
     ? runtimeHost.ready
       ? `${startupStatus} · Runtime 已连接`
+      : runtimeHasError
+        ? `${startupStatus} · Runtime 启动失败`
       : runtimeHost.running
         ? `${startupStatus} · Runtime 后台启动中`
         : `${startupStatus} · Runtime 正在重连`
@@ -2691,6 +2700,9 @@ function App() {
         if (status.ready) {
           ready = true;
           break;
+        }
+        if (status.phase === "failed") {
+          throw new Error(status.lastError || "Runtime 启动失败");
         }
         await new Promise((resolve) => window.setTimeout(resolve, 150));
       }
@@ -5171,10 +5183,16 @@ function App() {
           <div className="runtime-summary">
             <span className={`runtime-state-dot ${activeConversationGenerating ? "running" : runtimeHasError ? "error" : runtimeHost.ready ? "ready" : "preparing"}`} />
             <div>
-              <strong>{activeConversationGenerating ? "正在生成" : runtimeHasError ? "Runtime 需要恢复" : runtimeHost.ready ? "Runtime 已连接" : "Runtime 后台启动中"}</strong>
-              <small>{runtimeHasError ? "Runtime 出现异常，可尝试重启" : activeStream?.status ?? (preparingIds[activeId] ? "正在后台连接当前会话，可直接输入" : "等待下一条消息")}</small>
+              <strong>{activeConversationGenerating ? "正在生成" : runtimeHasError ? "Runtime 启动失败" : runtimeHost.ready ? "Runtime 已连接" : "Runtime 后台启动中"}</strong>
+              <small>{runtimeHasError ? "请查看下方错误详情" : activeStream?.status ?? (preparingIds[activeId] ? "正在后台连接当前会话，可直接输入" : "等待下一条消息")}</small>
             </div>
           </div>
+          {runtimeHasError && runtimeHost.lastError && (
+            <details className="runtime-error-detail" open>
+              <summary>Runtime 错误：{runtimeHost.lastError.split(/\r?\n/)[0].slice(0, 180)}</summary>
+              <pre>{runtimeHost.lastError.slice(0, 8000)}</pre>
+            </details>
+          )}
           <section className="right-work-section" aria-label="工作过程">
             <div className="right-section-title">Trace 流</div>
             {rightPanelTraces.length ? (
@@ -5230,6 +5248,10 @@ function App() {
           </div>
           <dl className="runtime-details">
             <div><dt>Runtime PID</dt><dd>{runtimeHost.pid ?? "启动中"}</dd></div>
+            {runtimeHost.exitCode !== null && <div><dt>退出码</dt><dd>{runtimeHost.exitCode}</dd></div>}
+            {runtimeHost.nodePath && <div><dt>Node 路径</dt><dd>{runtimeHost.nodePath}</dd></div>}
+            {runtimeHost.runtimePath && <div><dt>脚本路径</dt><dd>{runtimeHost.runtimePath}</dd></div>}
+            {runtimeHost.piPath && <div><dt>Pi 路径</dt><dd>{runtimeHost.piPath}</dd></div>}
             <div><dt>托管会话</dt><dd>{runtimeHost.sessionCount}</dd></div>
             <div><dt>Provider</dt><dd>{settings.provider}</dd></div>
             <div><dt>Model</dt><dd>{settings.model}</dd></div>

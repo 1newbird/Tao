@@ -1,4 +1,6 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +11,10 @@ const packageLockPath = join(projectRoot, "package-lock.json");
 const tauriConfigPath = join(projectRoot, "src-tauri", "tauri.conf.json");
 const cargoTomlPath = join(projectRoot, "src-tauri", "Cargo.toml");
 const cargoLockPath = join(projectRoot, "src-tauri", "Cargo.lock");
-const prepareScriptPath = join(projectRoot, "scripts", "prepare-tauri-release.mjs");
-const tauriCliPath = join(projectRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
+const tauriCliScriptPath = join(projectRoot, "scripts", "tauri-cli.ps1");
+const prepareWixScriptPath = join(projectRoot, "scripts", "prepare-wix.ps1");
+const verifyMsiScriptPath = join(projectRoot, "scripts", "verify-msi.ps1");
+const reportPath = join(projectRoot, ".tao-release-cache", "release-report.json");
 const target = "x86_64-pc-windows-msvc";
 
 function log(message) {
@@ -185,16 +189,62 @@ function run(command, args) {
   });
 }
 
+async function sha256(path) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function inspectBundle(version, bundles) {
+  const bundleKind = bundles || "msi";
+  const extension = bundleKind === "nsis" ? ".exe" : ".msi";
+  const bundleDir = join(projectRoot, "src-tauri", "target", target, "release", "bundle", bundleKind);
+  const candidates = (await readdir(bundleDir).catch(() => []))
+    .filter((name) => name.toLowerCase().endsWith(extension) && name.includes(version));
+  if (candidates.length !== 1) {
+    fail(`预期找到一个 ${bundleKind.toUpperCase()} ${version} 安装包，实际找到 ${candidates.length} 个：${bundleDir}`);
+  }
+  const path = join(bundleDir, candidates[0]);
+  const info = await stat(path);
+  if (info.size < 1024 * 1024) fail(`安装包异常小：${path}`);
+  if (bundleKind === "msi") {
+    log("检查 MSI 内的 Node、Runtime、Pi 和模型数据");
+    await run("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", verifyMsiScriptPath, path,
+    ]);
+  }
+  const hash = await sha256(path);
+  await mkdir(join(projectRoot, ".tao-release-cache"), { recursive: true });
+  await writeFile(reportPath, `${JSON.stringify({
+    version,
+    bundleKind,
+    path,
+    bytes: info.size,
+    sha256: hash,
+    verifiedAt: new Date().toISOString(),
+  }, null, 2)}\n`, "utf8");
+  log(`安装包：${path}`);
+  log(`大小：${(info.size / 1024 / 1024).toFixed(1)} MiB`);
+  log(`SHA-256：${hash}`);
+  log(`发布报告：${reportPath}`);
+}
+
 async function main() {
   if (process.platform !== "win32" || process.arch !== "x64") {
     fail("当前发布脚本只支持 Windows x64");
   }
 
   const { versionInput, bundles } = parseArgs(process.argv.slice(2));
+  if (bundles && bundles !== "msi" && bundles !== "nsis") {
+    fail(`仅支持单独构建 msi 或 nsis，收到：${bundles}`);
+  }
   const packageData = JSON.parse(await readFile(packageJsonPath, "utf8"));
   const version = versionInput === undefined
     ? packageData.version
     : normalizeVersion(versionInput);
+  if ((!bundles || bundles === "msi") && !/^\d+\.\d+\.\d+$/.test(version)) {
+    fail(`MSI 版本必须是纯数字 major.minor.patch，收到：${version}`);
+  }
 
   if (versionInput !== undefined) {
     await updateVersions(version);
@@ -208,9 +258,19 @@ async function main() {
     tauriArgs.push("--bundles", bundles);
   }
 
-  await run(process.execPath, [prepareScriptPath]);
+  log("构建前将自动准备并验证内置 Runtime 资源");
+  if (!bundles || bundles === "msi") {
+    log("准备项目本地 WiX 工具缓存");
+    await run("powershell.exe", [
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", prepareWixScriptPath,
+    ]);
+  }
   log(`开始构建 Windows x64 ${bundles ? `${bundles.toUpperCase()} ` : ""}安装包`);
-  await run(process.execPath, [tauriCliPath, ...tauriArgs]);
+  await run("powershell.exe", [
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tauriCliScriptPath,
+    ...tauriArgs,
+  ]);
+  await inspectBundle(version, bundles);
   log(`发布完成，版本 ${version}`);
 }
 

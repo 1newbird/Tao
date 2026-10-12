@@ -14,6 +14,7 @@ dist-ssr
 src-tauri/resources/*
 !src-tauri/resources/.gitkeep
 .tao-release-cache
+.tao-dev-config.json
 
 # Tao user data and local development overrides
 .tao/

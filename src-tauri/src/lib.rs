@@ -174,14 +174,26 @@ fn create_conversation_with_workspace(
 async fn delete_conversation(app: AppHandle, conversation_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let manager = app.state::<runtime::TaoRuntimeManager>();
-        manager.request(
-            &app,
-            serde_json::json!({
-                "type": "close_session",
-                "conversationId": conversation_id,
-            }),
-            Duration::from_secs(30),
-        )?;
+        let runtime_status = manager.status().ok();
+        if runtime_status.as_ref().is_some_and(|status| status.ready) {
+            if manager
+                .request(
+                    &app,
+                    serde_json::json!({
+                        "type": "close_session",
+                        "conversationId": conversation_id,
+                    }),
+                    Duration::from_secs(10),
+                )
+                .is_err()
+            {
+                // A live session could recreate its file after deletion.
+                manager.stop();
+            }
+        } else if runtime_status.as_ref().is_some_and(|status| status.running) {
+            // A session may still be opening while the host becomes ready.
+            manager.stop();
+        }
         storage::delete_conversation(&app, &conversation_id)
     })
     .await
@@ -441,7 +453,9 @@ pub fn run() {
         .manage(runtime::TaoRuntimeManager::default())
         .setup(|app| {
             let handle = app.handle().clone();
-            app.state::<runtime::TaoRuntimeManager>().start(&handle)?;
+            // Keep the window available so the startup error can be shown and
+            // local conversation management remains usable.
+            let _ = app.state::<runtime::TaoRuntimeManager>().start(&handle);
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())

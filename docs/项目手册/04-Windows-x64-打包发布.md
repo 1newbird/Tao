@@ -18,11 +18,11 @@
 - Linux 安装包；
 - ARM64 安装包。
 
-不能把 Release 目录中的裸 `tao.exe` 当成正式发布物。Tao 运行需要安装包中的前端资源和 `resources` 运行时资源，正式分发应使用 MSI。
+不能把 Release 目录中的裸 `tao.exe` 当成正式发布物。Tao 运行需要安装包中的前端和内置运行资源，正式分发应使用 MSI。
 
 ## 2. 发布前置条件
 
-发布准备脚本当前只接受 Windows x64：
+打包脚本当前只接受 Windows x64。首次在新电脑打包时，先按[开发环境手册](./03a-从零开始配置开发环境.md)运行 `scripts\setup-dev.ps1`，然后确认仓库包含：
 
 - Windows x64；
 - Node.js/npm；
@@ -30,7 +30,7 @@
 - Visual Studio/Build Tools；
 - Tao 根目录依赖；
 - `vendor/pi` 源码和 `vendor/pi/node_modules`；
-- 首次准备时可以访问 Node.js 下载地址的网络。
+- 首次准备时可以访问 Node.js 和 NuGet 下载地址的网络。
 
 模型服务的网络不是打包时必须的，但安装后使用模型需要能够访问对应网关或 API。
 
@@ -60,14 +60,15 @@ npm.cmd run tao:release:nsis -- 2.1
 
 该命令依次执行：
 
-1. `npm run tao:prepare`；
-2. 下载或复用 Node.js 22.19.0 Windows x64 压缩包；
-3. 校验 Node 压缩包 SHA-256；
-4. 复制 Tao Runtime；
-5. 复制 Pi 源码、模型数据和 Node 依赖；
-6. 执行前端构建；
-7. 执行 Tauri x86_64 Release 构建；
-8. 生成 MSI。
+1. 下载或复用 WiX 3.14.1 官方 NuGet 包，校验 SHA-512，放入项目的 `src-tauri/target/.tauri/` 缓存；
+2. 下载或复用 Node.js 22.19.0 Windows x64 压缩包，首次下载时校验官方 SHA-256；
+3. 从空的 `src-tauri/resources` 重新准备 Tao Runtime、Pi 源码、模型数据、运行依赖和 Node；
+4. 使用内置 Node 分别按普通 Windows 路径和 `\\?\` 扩展路径启动发布资源，等待 Runtime 真正输出 `ready` 并确认 `ping` 响应；
+5. 构建前端和 Rust x86_64 Release；
+6. 生成 MSI，并检查 MSI 文件表中 Node、Runtime、Pi 入口、tsx loader 和模型数据；
+7. 输出安装包大小、SHA-256 和 `.tao-release-cache/release-report.json`。
+
+Tauri 的 `beforeBuildCommand` 也执行第 3、4 步。因此直接执行 `npm.cmd run tauri build` 时，不会静默生成缺少 Runtime 资源的安装包。
 
 ## 4. 分步命令
 
@@ -77,13 +78,25 @@ npm.cmd run tao:release:nsis -- 2.1
 npm.cmd run tao:prepare
 ```
 
+只验证已准备的资源是否能够进入 `ready`：
+
+```powershell
+npm.cmd run tao:verify
+```
+
+若打包电脑上已有安装目录，也可以从仓库根目录直接验证该目录内的资源。脚本使用独立的临时 Tao 数据目录，不修改现有会话：
+
+```powershell
+node scripts/verify-tauri-release.mjs --resource-root 'D:\software_setup\tao'
+```
+
 准备 NSIS 并尝试生成 NSIS 安装包：
 
 ```powershell
 npm.cmd run tao:release:nsis
 ```
 
-NSIS 当前不作为默认方式，是因为 Pi 资源和 Node 运行时较大，压缩阶段耗时明显，曾出现全局超时风险。
+NSIS 当前不作为默认方式，是因为 Pi 资源和 Node 运行时较大，压缩阶段耗时明显，曾出现全局超时风险。当前自动下载 WiX 的步骤只用于 MSI。
 
 ## 5. 发布结果位置
 
@@ -92,7 +105,7 @@ NSIS 当前不作为默认方式，是因为 Pi 资源和 Node 运行时较大�
 ```text
 <Tao 项目根目录>\
 src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
-Tao_0.1.0_x64_en-US.msi
+Tao_0.1.3_x64_en-US.msi
 ```
 
 如果执行 `npm.cmd run tao:release -- 2.1`，文件名会变为：
@@ -101,7 +114,7 @@ Tao_0.1.0_x64_en-US.msi
 Tao_2.1.0_x64_en-US.msi
 ```
 
-同一版本重复打包时，目标目录中的同名 MSI 会被构建流程覆盖。正式升级不能只手动重命名 MSI，必须通过版本参数或修改版本文件后重新构建。
+同一版本重复打包时，目标目录中的同名 MSI 会被构建流程覆盖。正式升级不能只手动重命名 MSI，必须通过版本参数或修改版本文件后重新构建。MSI 版本号必须是纯数字 `major.minor.patch`。
 
 构建过程中还会生成：
 
@@ -112,13 +125,15 @@ src-tauri\resources\
 ```
 
 这些是构建或发布准备目录，不是用户数据，也不应提交到源码仓库。
+其中 `src-tauri/target` 和 `.tao-release-cache` 可以很大，尤其是 Rust Debug/Release 编译缓存；它们的磁盘占用不是 MSI 的体积。
 
 ## 6. 安装包内置内容
 
-发布资源大致如下：
+发布资源在源码中先生成于 `src-tauri/resources`。Tauri 在 Windows 上把 resource directory 解析为主程序所在目录，因此 MSI 安装后，`tao.exe` 与下面的 `node`、`runtime`、`pi` 目录同级。Pi 的 Biome、TypeScript 编译器、Vitest、Vite 等开发依赖已从安装资源中排除；`tsx`、模型数据及运行所需原生模块保留。
 
 ```text
-resources/
+<Tao 安装目录>/
+├─ tao.exe
 ├─ node/node.exe
 ├─ runtime/tao-runtime.mjs
 ├─ pi/
@@ -142,8 +157,8 @@ resources/
 
 目标电脑需要：
 
-1. Windows x64；
-2. Microsoft WebView2 Runtime；
+1. Windows 10/11 x64；内置 Node 22.19.0 的正式支持从 Windows 10 x64 起，当前安装包未在更早系统或 Windows ARM 上验收；
+2. Microsoft WebView2 Runtime；当前 MSI 使用 Tauri 默认安装方式，目标电脑缺失时安装程序会联网获取 WebView2 引导程序；
 3. 访问模型网关或 API 的网络；
 4. 用户自己配置 Provider、模型和 API Key。
 
@@ -156,6 +171,8 @@ resources/
 - Tao 开发依赖。
 
 如果目标电脑没有 WebView2，安装或首次运行时可能需要联网安装 WebView2 Runtime。当前安装包没有代码签名，Windows 可能显示未知发布者或 SmartScreen 提示，这不等于应用内部 Runtime 失败。
+
+普通对话无需 Git 或 Bash。若允许模型使用 Pi 的 `bash` 工具，目标电脑还需有可用的 Bash，例如 Git for Windows 提供的 Git Bash；缺少时该工具会报错。`grep` 和 `find` 工具需要 rg/fd，Pi 会先查找本机程序，缺少时尝试联网下载，离线目标电脑应预先提供这些工具。
 
 ## 8. 版本更新要求
 
@@ -178,7 +195,7 @@ npm.cmd run tao:release -- 2.1
 也可以先检查再发布：
 
 ```powershell
-npm.cmd run check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\tao.ps1 check
 npm.cmd run tao:release -- 2.1
 ```
 
@@ -196,17 +213,35 @@ npm.cmd run tao:release -- 2.1
 
 ## 10. 当前发布验收状态
 
-已经完成：
+2026-10-12 本机 `0.1.3` 后台窗口修复与打包验证：
 
-- 发布脚本语法检查；
-- TypeScript 和 Cargo 检查；
-- 发布资源准备；
-- 资源内置 Node 启动 Runtime；
-- MSI Release 构建。
+- 工作区 Git 状态与 Diff、Pi 的 `grep`/`find`、工具探测和共用命令执行入口均设置 Windows 隐藏控制台窗口，保留原有 stdout/stderr 捕获；
+- Tao 和 Pi 的 `npm run check` 均通过，发布资源双路径 `ready`/`ping` 通过；MSI 文件表确认修复后的 Pi 文件、Node、Runtime 和 40 个模型数据文件均已打入；
+- [Tao_0.1.3_x64_en-US.msi](../../src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Tao_0.1.3_x64_en-US.msi) 为 74.6 MiB（78,233,996 字节），SHA-256 为 `f9d84ba910bedee3c99862eeef4513cccb6c1bb653748f33a5c9a5b5289db228`；与 `0.1.2` 使用相同 UpgradeCode、不同 ProductCode。安装后仍需在实际使用中确认黑窗消失。
+
+2026-10-12 本机 `0.1.2` 修复与打包验证：
+
+- 修复安装目录返回 `\\?\D:\...` 时，tsx loader URL 被手工拼成 `file://///%3F/D:/...` 的错误；传给 Node 的资源和工作目录路径均统一为普通绝对路径，文件 URL 由 URL 库生成；
+- Windows 路径与特殊字符的 Rust 回归测试通过；当前 `D:\software_setup\tao` 安装目录中的内置 Node、Pi、Runtime 资源在隔离用户数据目录下，按普通路径和扩展路径启动均能进入 `ready` 并响应 `ping`；
+- 新发布资源完成相同的双路径预检；前端和 Rust Release 编译通过；MSI 文件表核对 18,970 个文件、40 个模型数据文件，以及 Node、Runtime、Pi 和 tsx loader；
+- `0.1.2` 的 ProductCode 与 `0.1.1` 不同，UpgradeCode 相同，满足 Windows Installer 识别同一产品升级的版本标识条件；
+- [Tao_0.1.2_x64_en-US.msi](../../src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Tao_0.1.2_x64_en-US.msi) 为 74.6 MiB（78,217,612 字节），SHA-256 为 `ff133cdf24a4cd7cb4844d38cd924176e0e228e95a797cb19511cafa5097e4b2`。安装后的实际界面与首次发送仍需验证。
+
+2026-10-10 本机 `0.1.1` 打包验证：
+
+- TypeScript、Cargo 和 Rust Release 构建通过；
+- 内置 Node 启动发布 Runtime，`ready` 和 `ping` 请求通过；
+- MSI 构建完成，文件表核对 Node、Runtime、Pi 入口、tsx loader 和 40 个模型数据文件；
+- 资源约 237.6 MiB，其中 Node 81.3 MiB、Pi 156.2 MiB、Runtime 约 0.1 MiB；
+- MSI 约 74.6 MiB。裁剪开发依赖前为 116.3 MiB，减少约 41.7 MiB。
+- `0.1.1` MSI 的 ProductCode 已变化，UpgradeCode 与 `0.1.0` 一致；实际覆盖安装仍需在目标电脑验收。
+
+上述体积按 MiB（1 MiB = 1,048,576 字节）显示。实际安装包路径和 SHA-256 以发布命令输出及 `.tao-release-cache/release-report.json` 为准。
 
 仍待完成：
 
 - 没有 Node.js 和 Tao 源码的干净 Windows x64 电脑安装；
-- 安装后的完整问答、工具、权限和会话恢复验收；
+- 安装后的 Runtime 状态、完整问答、工具、权限、会话恢复与故障时删除会话验收；
+- 安装版 `bash` 工具对 Git Bash 的依赖检查；
 - NSIS 体积和耗时评估；
 - 代码签名。

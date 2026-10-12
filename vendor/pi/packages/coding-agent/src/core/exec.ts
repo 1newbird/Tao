@@ -41,6 +41,7 @@ export async function execCommand(
 		const proc = spawn(command, args, {
 			cwd,
 			shell: false,
+			windowsHide: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 
