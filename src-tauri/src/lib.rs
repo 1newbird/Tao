@@ -3,9 +3,10 @@ mod files;
 mod runtime;
 mod pi;
 mod storage;
+mod agents;
 
 use models::{
-    AppSettings, AppState, AttachmentReference, ConnectionTestRequest, ConnectionTestResult,
+    AgentCatalog, AppSettings, AppState, AttachmentReference, ConnectionTestRequest, ConnectionTestResult,
     Conversation, ModelInfo, PermissionResponseRequest, PrepareSessionRequest,
     QueueMessageRequest, RetryMessageRequest, RuntimeConfiguration, SaveSettingsResult,
     SendMessageRequest, SetConversationModelRequest,
@@ -294,11 +295,71 @@ async fn save_runtime_configuration(
 ) -> Result<RuntimeConfiguration, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let configuration = storage::save_runtime_configuration(&app, configuration)?;
-        app.state::<runtime::TaoRuntimeManager>().restart(&app)?;
+        let mut catalog = agents::load(&app)?;
+        let migrated = agents::migrate(configuration.clone());
+        for tool in migrated.tools {
+            catalog.tools.retain(|old| old.id != tool.id);
+            catalog.tools.push(tool);
+        }
+        let profile = catalog.profiles.iter_mut().find(|profile| profile.id == catalog.default_profile_id).ok_or("默认组合不存在")?;
+        profile.configuration = migrated.profiles[0].configuration.clone();
+        profile.custom_tool_ids = migrated.profiles[0].custom_tool_ids.clone();
+        agents::save(&app, catalog)?;
         Ok(configuration)
     })
     .await
     .map_err(|error| format!("等待保存 Runtime 配置失败：{error}"))?
+}
+
+#[tauri::command]
+fn save_agent_catalog(app: AppHandle, catalog: AgentCatalog) -> Result<AgentCatalog, String> {
+    agents::save(&app, catalog)
+}
+
+#[tauri::command]
+fn get_agent_catalog(app: AppHandle) -> Result<AgentCatalog, String> { agents::load(&app) }
+
+#[tauri::command]
+fn parse_agent_catalog(content: String) -> Result<AgentCatalog, String> {
+    if content.len() > 2 * 1024 * 1024 { return Err("配置文件不能超过 2 MB".into()); }
+    agents::normalize(serde_json::from_str(&content).map_err(|e| format!("配置 JSON 无效：{e}"))?)
+}
+
+#[tauri::command]
+fn choose_agent_catalog(app: AppHandle) -> Result<Option<AgentCatalog>, String> {
+    let Some(selected) = app.dialog().file().set_title("导入 Tao 智能体组合").add_filter("Tao 组合", &["json"]).blocking_pick_file() else { return Ok(None); };
+    let path = PathBuf::from(selected.to_string());
+    let metadata = std::fs::metadata(&path).map_err(|e| format!("无法读取配置文件：{e}"))?;
+    if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 { return Err("配置应为不超过 2 MB 的 JSON 文件".into()); }
+    parse_agent_catalog(std::fs::read_to_string(path).map_err(|e| format!("无法读取配置文件：{e}"))?).map(Some)
+}
+
+#[tauri::command]
+fn set_workspace_agent_default(app: AppHandle, workspace_path: String, profile_id: String) -> Result<AgentCatalog, String> {
+    agents::set_workspace_default(&app, &workspace_path, &profile_id)
+}
+
+#[tauri::command]
+async fn set_conversation_agent(app: AppHandle, conversation_id: String, profile_id: String) -> Result<Conversation, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = agents::snapshot(&agents::load(&app)?, &profile_id)?;
+        let mut conversation = storage::load_conversation_if_exists(&app, &conversation_id)?.ok_or("会话不存在")?;
+        let manager = app.state::<runtime::TaoRuntimeManager>();
+        if manager.status()?.ready {
+            manager.request(&app, serde_json::json!({ "type": "close_idle_session", "conversationId": conversation_id }), Duration::from_secs(10))?;
+        }
+        if conversation.messages.is_empty() {
+            if let Some(defaults) = &snapshot.default_model {
+                conversation.provider = defaults.provider.clone();
+                conversation.model = defaults.model.clone();
+                conversation.thinking_level = defaults.thinking_level.clone();
+            }
+        }
+        conversation.agent_snapshot = Some(snapshot);
+        conversation.updated_at = storage::now_millis();
+        storage::write_conversation(&app, &conversation)?;
+        Ok(conversation)
+    }).await.map_err(|e| format!("切换智能体组合失败：{e}"))?
 }
 
 #[tauri::command]
@@ -325,8 +386,11 @@ async fn test_custom_tool(
                 "tool": request.tool,
                 "input": request.input,
                 "workspacePath": workspace_path,
+                "permissionRule": request.permission_rule,
             }),
-            Duration::from_secs(120),
+            // Tool timeout is at most 120 seconds; allow its process-tree
+            // cancellation and result delivery to finish before the RPC expires.
+            Duration::from_secs(130),
         )?;
         Ok(TestCustomToolResult {
             output: response
@@ -411,7 +475,7 @@ async fn prepare_session(app: AppHandle, request: PrepareSessionRequest) -> Resu
         pi::prepare_session(&app, &manager, request)
     })
     .await
-    .map_err(|error| format!("等待准备 Pi 会话失败：{error}"))?
+    .map_err(|error| format!("等待准备 Tao 会话失败：{error}"))?
 }
 
 #[tauri::command]
@@ -434,7 +498,7 @@ async fn send_message(app: AppHandle, request: SendMessageRequest) -> Result<Con
         pi::send_message(&app, &manager, request)
     })
         .await
-        .map_err(|error| format!("等待 Pi 进程失败：{error}"))?
+        .map_err(|error| format!("等待 Tao 运行失败：{error}"))?
 }
 
 #[tauri::command]
@@ -444,7 +508,7 @@ async fn retry_message(app: AppHandle, request: RetryMessageRequest) -> Result<C
         pi::retry_message(&app, &manager, request)
     })
         .await
-        .map_err(|error| format!("等待 Pi 进程失败：{error}"))?
+        .map_err(|error| format!("等待 Tao 运行失败：{error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -476,6 +540,12 @@ pub fn run() {
             rename_workspace,
             save_settings,
             save_runtime_configuration,
+            save_agent_catalog,
+            get_agent_catalog,
+            parse_agent_catalog,
+            choose_agent_catalog,
+            set_workspace_agent_default,
+            set_conversation_agent,
             test_custom_tool,
             abort_generation,
             queue_message,

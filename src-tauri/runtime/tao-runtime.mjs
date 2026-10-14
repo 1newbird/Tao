@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
 import { promisify } from "node:util";
+import { applyToolPolicy, assertHttpTarget, canonicalTarget, resolveHeaderReferences } from "./policy.mjs";
 
 const startedAt = Date.now();
 const argumentsByName = new Map();
@@ -18,11 +19,17 @@ const sessionsDirectory = join(taoHome, "sessions");
 const sessionHandles = new Map();
 const sessionCreations = new Map();
 const pendingPermissions = new Map();
+const requestEpochs = new Map();
 const DEFAULT_PERMISSION_TIMEOUT_MS = 60_000;
 let shuttingDown = false;
 let sdk;
 let sharedModelRuntime;
-const execAsync = promisify(exec);
+let validateToolArguments;
+const execFileAsync = promisify(execFile);
+
+function commandProfile(command) {
+  return command.runtimeConfiguration ?? loadRuntimeProfile() ?? {};
+}
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -203,6 +210,7 @@ function resourceLoaderOptions(permissionContext, profile = loadRuntimeProfile()
         permissionContext.conversationId,
         permissionContext.cwd,
         permissionContext.customTools,
+        profile,
       ),
     ];
   }
@@ -244,7 +252,7 @@ function customToolSchema(configuration) {
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" && parsed.type === "object" ? parsed : fallback;
   } catch {
-    return fallback;
+    throw new Error("自定义工具的输入 Schema 不是有效 JSON");
   }
 }
 
@@ -268,47 +276,111 @@ function normalizeCustomToolOutput(value, maxLength = 20_000) {
   return `${text.slice(0, maxLength)}\n[输出已截断]`;
 }
 
+async function readHttpResponse(response) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 2 * 1024 * 1024) { await reader.cancel(); throw new Error("HTTP 工具响应超过 2 MB 上限"); }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally { reader.releaseLock(); }
+}
+
+function executeToolProcess(program, args, options, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolveResult, reject) => {
+    let stopping;
+    let aborted = false;
+    const onAbort = () => {
+      if (aborted) return;
+      aborted = true;
+      // Kill the owned process tree before its parent disappears. Native exec's
+      // AbortSignal handling only kills cmd.exe/the direct child on Windows.
+      stopping = (async () => {
+        if (!child.pid) return;
+        if (process.platform === "win32") {
+          try {
+            await execFileAsync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5000 });
+          } catch {
+            child.kill();
+          }
+        } else {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+        }
+      })();
+    };
+    const complete = async (error, stdout, stderr) => {
+      signal.removeEventListener("abort", onAbort);
+      await stopping;
+      if (aborted) reject(new Error("工具执行已取消或超时"));
+      else if (error) reject(error);
+      else resolveResult({ stdout, stderr });
+    };
+    const child = args === null
+      ? exec(program, options, complete)
+      : execFile(program, args, options, complete);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 async function executeConfiguredCustomTool(configuration, params, cwd, signal) {
+  const parameters = customToolSchema(configuration);
+  params = validateToolArguments({ name: configuration.name, parameters }, { name: configuration.name, arguments: params });
+  const timeoutMs = Math.min(120_000, Math.max(1000, Number(configuration.timeoutMs) || 120_000));
+  const executionSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
   const kind = String(configuration?.kind ?? "command").toLowerCase();
   if (kind === "http") {
     const url = renderCustomToolTemplate(configuration.url, params);
     if (!url.trim()) throw new Error("自定义 HTTP 工具缺少 URL");
-    let headers = {};
-    if (configuration.headers?.trim()) {
-      try {
-        headers = JSON.parse(configuration.headers);
-      } catch {
-        throw new Error("自定义 HTTP 工具的请求头不是有效 JSON");
-      }
-    }
+    const headers = resolveHeaderReferences(configuration.headers);
+    assertHttpTarget(url, configuration.allowedHosts ?? []);
     const method = String(configuration.method || "GET").toUpperCase();
     const body = renderCustomToolTemplate(configuration.bodyTemplate, params);
     const response = await fetch(url, {
       method,
       headers,
       ...(body.trim() && !["GET", "HEAD"].includes(method) ? { body } : {}),
-      signal,
+      signal: executionSignal,
+      redirect: "error",
     });
-    const responseText = await response.text();
+    const responseText = await readHttpResponse(response);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${normalizeCustomToolOutput(responseText, 2_000)}`);
     }
     return normalizeCustomToolOutput(responseText);
   }
 
+  if (kind === "process") {
+    const args = JSON.parse(configuration.arguments || "[]");
+    if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new Error("程序参数必须是 JSON 字符串数组");
+    const executable = ["node", "node.exe"].includes(configuration.executable) ? process.execPath : configuration.executable;
+    const result = await executeToolProcess(executable, args.map((arg) => renderCustomToolTemplate(arg, params)), {
+      cwd, windowsHide: true, detached: process.platform !== "win32", maxBuffer: 2 * 1024 * 1024,
+      env: { ...process.env, TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}) },
+    }, executionSignal);
+    return normalizeCustomToolOutput([result.stdout, result.stderr].filter(Boolean).join("\n") || "程序执行完成");
+  }
   const command = renderCustomToolTemplate(configuration.command, params).trim();
   if (!command) throw new Error("自定义命令工具缺少命令模板");
-  const result = await execAsync(command, {
+  const result = await executeToolProcess(command, null, {
     cwd,
     windowsHide: true,
-    timeout: 120_000,
+    detached: process.platform !== "win32",
     maxBuffer: 2 * 1024 * 1024,
-    signal,
     env: {
       ...process.env,
       TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}),
     },
-  });
+  }, executionSignal);
   const output = [result.stdout, result.stderr].filter((value) => value?.trim()).join("\n");
   return normalizeCustomToolOutput(output || `命令执行完成（退出码 ${result.code ?? 0}）`);
 }
@@ -396,7 +468,7 @@ function sessionFingerprint(command) {
     model: command.model?.trim(),
     thinkingLevel: command.thinkingLevel?.trim(),
     workspacePath: resolveSessionCwd(command),
-    profile: loadRuntimeProfile(),
+    profile: commandProfile(command),
   });
 }
 
@@ -477,7 +549,7 @@ function normalizePromptMessages(messages, metadata = {}) {
     }
     if (message?.role !== "assistant") continue;
     if (message.stopReason === "error") {
-      assistantError = message.errorMessage || "Pi 没有返回文本";
+      assistantError = message.errorMessage || "Tao 内核没有返回文本";
       continue;
     }
     const content = extractFinalText(message);
@@ -492,7 +564,7 @@ function normalizePromptMessages(messages, metadata = {}) {
     }
   }
   if (!normalized.some((message) => message.role === "assistant")) {
-    throw new Error(assistantError ?? "Pi 没有返回文本");
+    throw new Error(assistantError ?? "Tao 内核没有返回文本");
   }
   const assistant = [...normalized].reverse().find((message) => message.role === "assistant");
   if (assistant) {
@@ -632,9 +704,9 @@ function normalizePathTarget(cwd, raw) {
   }
   const resolved = isAbsolute(raw) ? resolve(raw) : resolve(cwd, raw);
   const workspaceReal = safeRealpath(cwd);
-  const resolvedReal = existsSync(resolved) ? safeRealpath(resolved) : resolved;
+  const resolvedReal = canonicalTarget(resolved);
   const relativePath = relative(workspaceReal, resolvedReal);
-  const inWorkspace = relativePath === "" || (!!relativePath && !relativePath.startsWith("..") && !isAbsolute(relativePath));
+  const inWorkspace = relativePath === "" || (relativePath !== ".." && !relativePath.startsWith("../") && !relativePath.startsWith("..\\") && !isAbsolute(relativePath));
   const display = inWorkspace
     ? (relativePath ? relativePath.replaceAll("\\", "/") : ".")
     : basename(resolvedReal);
@@ -947,7 +1019,7 @@ async function resolvePermission(conversationId, cwd, audit) {
     emitPermissionDecisionTrace(handle, audit, "error", permissionSummary(audit, "已按工具配置拒绝"));
     return { allowed: false, decision: "deny", reason: audit.reason };
   }
-  if (active?.permissionMode === "full_access") {
+  if (active?.permissionMode === "full_access" && !audit.enforcedAsk) {
     emitPermissionDecisionTrace(handle, audit, "completed", permissionSummary(audit, "完全访问已自动允许"));
     return { allowed: true, decision: "full_access" };
   }
@@ -1071,13 +1143,20 @@ function cancelPendingPermissions(conversationId, reason = "请求已取消") {
   }
 }
 
-function createTaoPermissionExtension(conversationId, cwd, customTools = []) {
+function createTaoPermissionExtension(conversationId, cwd, customTools = [], profile = {}) {
   return {
     name: "tao-permissions",
     hidden: true,
     factory(pi) {
       pi.on("tool_call", async (event) => {
-        const audit = classifyToolPermission(cwd, event.toolName, event.input, customTools);
+        let audit;
+        try {
+          audit = applyToolPolicy(cwd, event.toolName, event.input, classifyToolPermission(cwd, event.toolName, event.input, customTools), profile);
+        } catch {
+          // Hook errors may otherwise be reported by the kernel while it
+          // continues tool execution. An unavailable audit must fail closed.
+          return { block: true, reason: "Tao 无法确认工具访问范围，已阻止本次执行。" };
+        }
         const result = await resolvePermission(conversationId, cwd, audit);
         if (result.allowed) return undefined;
         return { block: true, reason: `Tao 权限策略已拒绝：${result.reason ?? audit.reason}` };
@@ -1085,7 +1164,7 @@ function createTaoPermissionExtension(conversationId, cwd, customTools = []) {
 
       pi.on("user_bash", async (event) => {
         const audit = {
-          ...classifyToolPermission(event.cwd || cwd, "bash", { command: event.command }, customTools),
+          ...applyToolPolicy(event.cwd || cwd, "bash", { command: event.command }, classifyToolPermission(event.cwd || cwd, "bash", { command: event.command }, customTools), profile),
           title: "执行用户命令",
         };
         const result = await resolvePermission(conversationId, event.cwd || cwd, audit);
@@ -1684,7 +1763,7 @@ async function createSession(command, fingerprint) {
   if (!model) throw new Error(`找不到模型：${effectiveProvider}/${modelId}`);
 
   const sessionCwd = resolveSessionCwd(command);
-  const profile = loadRuntimeProfile() ?? {};
+  const profile = commandProfile(command);
   const selectedTools = sessionToolSelection(profile);
   const customTools = configuredCustomTools(profile, sessionCwd);
   const sessionFile = join(sessionsDirectory, `${command.conversationId}.jsonl`);
@@ -1742,7 +1821,7 @@ async function testConfiguredCustomTool(command) {
   if (!configuration || typeof configuration !== "object") {
     throw new Error("缺少自定义工具配置");
   }
-  if (customToolPermissionMode(configuration) === "deny") {
+  if (customToolPermissionMode(configuration) === "deny" || command.permissionRule?.mode === "deny") {
     throw new Error("该工具的权限模式为“禁止执行”，无法进行测试");
   }
   const cwd = resolveSessionCwd({ workspacePath: command.workspacePath });
@@ -1767,6 +1846,7 @@ async function ensureSession(command) {
   if (existing?.fingerprint === fingerprint) return existing;
   const creating = sessionCreations.get(command.conversationId);
   if (creating?.fingerprint === fingerprint) return creating.promise;
+  if (existing?.activeRequest || creating) throw new Error("会话正在运行或准备，不能切换配置");
   if (existing) await disposeSession(command.conversationId);
 
   const promise = createSession(command, fingerprint);
@@ -1786,8 +1866,9 @@ async function prepareSession(command) {
 }
 
 async function cancelActiveRequest(command) {
+  requestEpochs.set(command.conversationId, (requestEpochs.get(command.conversationId) ?? 0) + 1);
   const handle = sessionHandles.get(command.conversationId);
-  if (!handle?.activeRequest) return null;
+  if (!handle?.activeRequest) return { cancelled: true };
   cancelPendingPermissions(command.conversationId, "请求已停止，权限确认已取消");
   handle.activeRequest.aborted = true;
   try {
@@ -1802,13 +1883,18 @@ async function cancelActiveRequest(command) {
   if (handle.activeRequest) {
     await disposeSession(command.conversationId);
   }
-  return null;
+  return { cancelled: true };
 }
 
 async function promptSession(command) {
+  const epoch = requestEpochs.get(command.conversationId) ?? 0;
   const readyStarted = Date.now();
   emitEvent(command.conversationId, command.requestId, "runtime", "status", "正在连接会话…");
   const handle = await ensureSession(command);
+  if ((requestEpochs.get(command.conversationId) ?? 0) !== epoch) {
+    emitEvent(command.conversationId, command.requestId, "turn", "aborted");
+    return { messages: [{ role: "assistant", content: "生成已停止，可以继续提问。", status: "stopped" }] };
+  }
   emitEvent(command.conversationId, command.requestId, "metric", "ready", undefined, Date.now() - readyStarted);
   if (handle.activeRequest) throw new Error("当前会话正在生成，请使用追加消息");
 
@@ -1934,15 +2020,8 @@ async function dispatch(command) {
       return cancelActiveRequest(command);
     case "permission_response":
       return resolvePendingPermission(command);
-    case "abort": {
-      const handle = sessionHandles.get(command.conversationId);
-      if (!handle) throw new Error("当前会话尚未创建");
-      if (!handle.activeRequest) throw new Error("当前会话没有正在生成的消息");
-      cancelPendingPermissions(command.conversationId, "请求已停止，权限确认已取消");
-      handle.activeRequest.aborted = true;
-      await handle.runtime.session.abort();
-      return null;
-    }
+    case "abort":
+      return cancelActiveRequest(command);
     case "steer": {
       const handle = sessionHandles.get(command.conversationId);
       if (!handle) throw new Error("当前会话尚未创建");
@@ -1960,6 +2039,11 @@ async function dispatch(command) {
     case "close_session":
       await disposeSession(command.conversationId);
       return null;
+    case "close_idle_session": {
+      if (sessionHandles.get(command.conversationId)?.activeRequest || sessionCreations.has(command.conversationId)) throw new Error("会话正在运行或准备，不能切换组合");
+      await disposeSession(command.conversationId);
+      return null;
+    }
     default:
       throw new Error(`未知 Runtime 命令：${command.type}`);
   }
@@ -1977,6 +2061,7 @@ async function shutdown() {
 try {
   const sdkEntry = pathToFileURL(join(piRoot, "packages", "coding-agent", "src", "index.ts")).href;
   sdk = await import(sdkEntry);
+  ({ validateToolArguments } = await import(pathToFileURL(join(piRoot, "packages", "ai", "src", "index.ts")).href));
   sharedModelRuntime = await sdk.ModelRuntime.create({ authPath: join(taoHome, "auth.json"), modelsPath: join(taoHome, "models.json") });
   await sharedModelRuntime.refresh({ allowNetwork: false });
   write({ type: "ready", pid: process.pid, startedAt, sessionCount: 0 });

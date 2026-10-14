@@ -53,6 +53,7 @@ $required = @(
     'tao.exe',
     'node\node.exe',
     'runtime\tao-runtime.mjs',
+    'runtime\policy.mjs',
     'pi\packages\coding-agent\src\index.ts',
     'pi\node_modules\tsx\dist\preflight.cjs',
     'pi\node_modules\tsx\dist\loader.mjs',

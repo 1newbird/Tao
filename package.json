@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "check": "tsc --noEmit && cargo check --manifest-path src-tauri/Cargo.toml",
+    "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-dev.ps1",
+    "test:agents": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agents.ps1",
     "preview": "vite preview",
+    "preview:ui": "node scripts/preview-ui.mjs",
     "tao:prepare": "node scripts/prepare-tauri-release.mjs",
     "tao:verify": "node scripts/verify-tauri-release.mjs",
     "tao:release": "node scripts/release-tauri.mjs",
@@ -15,6 +17,7 @@
     "tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-cli.ps1"
   },
   "dependencies": {
+    "@radix-ui/react-dropdown-menu": "2.2.1",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "2.5.4",

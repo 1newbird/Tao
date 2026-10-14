@@ -414,6 +414,7 @@ impl TaoRuntimeProcess {
     }
 
     fn stop(&self) {
+        self.ready.store(false, Ordering::SeqCst);
         if let Ok(mut stdin) = self.stdin.lock() {
             let _ = stdin.write_all(b"{\"type\":\"shutdown\"}\n");
             let _ = stdin.flush();
@@ -426,6 +427,14 @@ impl TaoRuntimeProcess {
                     return;
                 }
                 thread::sleep(Duration::from_millis(50));
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // A forced host shutdown must also stop its owned tool processes.
+                let pid = child.id().to_string();
+                let mut terminate = Command::new("taskkill.exe");
+                std::os::windows::process::CommandExt::creation_flags(&mut terminate, 0x08000000);
+                let _ = terminate.args(["/PID", &pid, "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
             }
             let _ = child.kill();
             let _ = child.wait();

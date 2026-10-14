@@ -4,6 +4,7 @@ use crate::models::{
 };
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,7 +48,8 @@ pub fn conversation_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
 
 pub fn get_app_state(app: &AppHandle) -> Result<AppState, String> {
     let settings = load_settings(app)?;
-    let conversations = load_conversations(app)?;
+    let agent_catalog = crate::agents::load(app)?;
+    let (conversations, storage_warnings) = load_conversations_with_warnings(app)?;
     let provider_auth_configured = provider_auth_status(app, &settings)?;
 
     Ok(AppState {
@@ -58,12 +60,14 @@ pub fn get_app_state(app: &AppHandle) -> Result<AppState, String> {
             .unwrap_or(false),
         provider_auth_configured,
         settings,
-        runtime_configuration: load_runtime_configuration(app)?,
+        runtime_configuration: crate::agents::snapshot(&agent_catalog, &agent_catalog.default_profile_id)?.configuration,
+        agent_catalog,
+        storage_warnings,
     })
 }
 
-pub fn load_runtime_configuration(app: &AppHandle) -> Result<RuntimeConfiguration, String> {
-    let path = app_data_root(app)?.join("runtime").join("profile.json");
+pub(crate) fn load_runtime_configuration_at(root: &Path) -> Result<RuntimeConfiguration, String> {
+    let path = root.join("runtime").join("profile.json");
     if !path.exists() {
         return Ok(RuntimeConfiguration::default());
     }
@@ -96,7 +100,7 @@ pub fn save_runtime_configuration(
     Ok(configuration)
 }
 
-fn normalize_runtime_configuration(
+pub(crate) fn normalize_runtime_configuration(
     configuration: RuntimeConfiguration,
 ) -> Result<RuntimeConfiguration, String> {
     if !matches!(configuration.system_prompt_mode.as_str(), "append" | "replace") {
@@ -104,6 +108,16 @@ fn normalize_runtime_configuration(
     }
     if !matches!(configuration.tool_mode.as_str(), "default" | "custom") {
         return Err("工具模式无效".to_string());
+    }
+    if configuration.system_prompt.len() > 100_000 || configuration.conversation_prompt.len() > 100_000 {
+        return Err("提示词不能超过 100000 字节".into());
+    }
+    let mut tool_permissions = BTreeMap::new();
+    for (tool, rule) in configuration.tool_permissions {
+        if tool.is_empty() || !tool.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) || !matches!(rule.mode.as_str(), "inherit" | "ask" | "allow" | "deny") || !matches!(rule.path_scope.as_str(), "any" | "workspace") {
+            return Err("工具权限规则无效".into());
+        }
+        if tool_permissions.insert(tool.to_ascii_lowercase(), rule).is_some() { return Err("工具权限规则重复".into()); }
     }
 
     let mut enabled_tools = Vec::new();
@@ -122,6 +136,7 @@ fn normalize_runtime_configuration(
 
     let mut custom_tools = Vec::new();
     for mut tool in configuration.custom_tools {
+        if [&tool.command, &tool.arguments, &tool.headers, &tool.body_template, &tool.input_schema].iter().any(|value| value.len() > 100_000) { return Err("工具模板和 Schema 不能超过 100000 字节".into()); }
         tool.id = tool.id.trim().to_string();
         tool.name = tool.name.trim().to_ascii_lowercase();
         tool.label = tool.label.trim().to_string();
@@ -129,6 +144,7 @@ fn normalize_runtime_configuration(
         tool.kind = tool.kind.trim().to_ascii_lowercase();
         tool.permission_mode = tool.permission_mode.trim().to_ascii_lowercase();
         tool.command = tool.command.trim().to_string();
+        tool.executable = tool.executable.trim().to_string();
         tool.method = tool.method.trim().to_ascii_uppercase();
         tool.url = tool.url.trim().to_string();
         tool.headers = tool.headers.trim().to_string();
@@ -145,7 +161,7 @@ fn normalize_runtime_configuration(
         {
             return Err("自定义工具名称只能使用字母、数字、下划线和连字符".to_string());
         }
-        if !matches!(tool.kind.as_str(), "command" | "http") {
+        if !matches!(tool.kind.as_str(), "command" | "http" | "process") {
             return Err("自定义工具类型无效".to_string());
         }
         if !matches!(tool.permission_mode.as_str(), "ask" | "allow" | "deny") {
@@ -165,6 +181,20 @@ fn normalize_runtime_configuration(
         }
         if tool.kind == "http" && tool.url.is_empty() {
             return Err(format!("自定义工具 {} 缺少 URL", tool.name));
+        }
+        if tool.kind == "process" && (tool.executable.trim().is_empty() || serde_json::from_str::<Vec<String>>(&tool.arguments).is_err()) {
+            return Err(format!("工具 {} 需要可执行文件和 JSON 字符串参数数组", tool.name));
+        }
+        if !tool.headers.is_empty() && serde_json::from_str::<BTreeMap<String, String>>(&tool.headers).is_err() {
+            return Err(format!("工具 {} 的请求头必须是 JSON 字符串对象", tool.name));
+        }
+        if tool.kind == "http" && !matches!(tool.method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
+            return Err("HTTP 方法无效".into());
+        }
+        tool.timeout_ms = tool.timeout_ms.clamp(1000, 120_000);
+        tool.allowed_hosts = tool.allowed_hosts.iter().map(|host| host.trim().to_ascii_lowercase()).filter(|host| !host.is_empty()).collect();
+        if tool.allowed_hosts.iter().any(|host| host.contains('/') || host.contains(':') || host.contains('*') || host.chars().any(char::is_whitespace)) {
+            return Err("HTTP 允许域名填写完整主机名，不含协议、端口、路径或通配符".into());
         }
         if !tool.input_schema.is_empty() {
             let schema: serde_json::Value = serde_json::from_str(&tool.input_schema)
@@ -189,6 +219,7 @@ fn normalize_runtime_configuration(
         skills_enabled: configuration.skills_enabled,
         extensions_enabled: configuration.extensions_enabled,
         custom_tools,
+        tool_permissions,
     })
 }
 
@@ -211,6 +242,12 @@ pub fn create_conversation_with_workspace(
         conversation.workspace_path = normalize_workspace_path(workspace_path)?;
         conversation.workspace_name = workspace_name.unwrap_or_default().trim().to_string();
     }
+    crate::agents::ensure_snapshot(app, &mut conversation)?;
+    if let Some(defaults) = conversation.agent_snapshot.as_ref().and_then(|snapshot| snapshot.default_model.as_ref()) {
+        conversation.provider = defaults.provider.clone();
+        conversation.model = defaults.model.clone();
+        conversation.thinking_level = defaults.thinking_level.clone();
+    }
     write_conversation(app, &conversation)?;
     Ok(conversation)
 }
@@ -230,6 +267,7 @@ pub fn new_conversation(provider: &str, model: &str, thinking_level: &str) -> Co
         workspace_path: String::new(),
         workspace_name: String::new(),
         messages: Vec::new(),
+        agent_snapshot: None,
     }
 }
 
@@ -242,9 +280,9 @@ pub fn load_conversation_if_exists(
         return Ok(None);
     }
     let content = fs::read_to_string(&path).map_err(|error| format!("无法读取对话：{error}"))?;
-    serde_json::from_str(&content)
-        .map(Some)
-        .map_err(|error| format!("对话数据损坏：{error}"))
+    let mut conversation: Conversation = serde_json::from_str(&content).map_err(|error| format!("对话数据损坏：{error}"))?;
+    if crate::agents::ensure_snapshot(app, &mut conversation)? { write_conversation(app, &conversation)?; }
+    Ok(Some(conversation))
 }
 
 pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<(), String> {
@@ -694,9 +732,14 @@ fn normalize_permission_timeout_ms(value: u64) -> u64 {
 }
 
 fn load_conversations(app: &AppHandle) -> Result<Vec<Conversation>, String> {
+    load_conversations_with_warnings(app).map(|(conversations, _)| conversations)
+}
+
+fn load_conversations_with_warnings(app: &AppHandle) -> Result<(Vec<Conversation>, Vec<String>), String> {
     let root = app_data_root(app)?.join("conversations");
     fs::create_dir_all(&root).map_err(|error| format!("无法创建对话目录：{error}"))?;
     let mut conversations = Vec::new();
+    let mut warnings = Vec::new();
 
     for entry in fs::read_dir(&root).map_err(|error| format!("无法读取对话目录：{error}"))? {
         let entry = entry.map_err(|error| format!("无法读取对话目录项：{error}"))?;
@@ -704,15 +747,13 @@ fn load_conversations(app: &AppHandle) -> Result<Vec<Conversation>, String> {
         if !path.is_file() {
             continue;
         }
-        let content = fs::read_to_string(&path).map_err(|error| format!("无法读取对话：{error}"))?;
-        let mut conversation: Conversation = serde_json::from_str(&content)
-            .map_err(|error| format!("对话数据损坏（{}）：{error}", path.display()))?;
-        reconcile_conversation_from_session(app, &mut conversation)?;
-        if conversation.messages.is_empty() && conversation.workspace_path.trim().is_empty() {
-            let _ = fs::remove_dir_all(entry.path());
-        } else {
-            conversations.push(conversation);
-        }
+        let mut conversation = match read_conversation_file(&path) {
+            Ok(conversation) => conversation,
+            Err(error) => { warnings.push(error); continue; }
+        };
+        if crate::agents::ensure_snapshot(app, &mut conversation)? { write_conversation(app, &conversation)?; }
+        if let Err(error) = reconcile_conversation_from_session(app, &mut conversation) { warnings.push(error); }
+        conversations.push(conversation);
     }
 
     conversations.sort_by(|left: &Conversation, right: &Conversation| {
@@ -721,7 +762,15 @@ fn load_conversations(app: &AppHandle) -> Result<Vec<Conversation>, String> {
             .cmp(&left.pinned)
             .then_with(|| right.updated_at.cmp(&left.updated_at))
     });
-    Ok(conversations)
+    Ok((conversations, warnings))
+}
+
+fn read_conversation_file(path: &Path) -> Result<Conversation, String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("无法读取会话 {}：{e}", path.display()))?;
+    let conversation: Conversation = serde_json::from_str(&content).map_err(|e| format!("已跳过损坏会话 {}：{e}", path.display()))?;
+    validate_id(&conversation.id)?;
+    if path.parent().and_then(Path::file_name).and_then(|name| name.to_str()) != Some(&conversation.id) { return Err(format!("会话 ID 与目录不一致：{}", path.display())); }
+    Ok(conversation)
 }
 
 fn reconcile_conversation_from_session(
@@ -1064,8 +1113,50 @@ fn validate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<(), String> {
+pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<(), String> {
     let content = serde_json::to_string_pretty(value)
         .map_err(|error| format!("无法序列化{label}：{error}"))?;
-    fs::write(path, content).map_err(|error| format!("无法保存{label}：{error}"))
+    let parent = path.parent().ok_or_else(|| format!("{label}路径无效"))?;
+    fs::create_dir_all(parent).map_err(|e| format!("无法创建{label}目录：{e}"))?;
+    let temporary = parent.join(format!(".{}.tmp", new_id("save")));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result.map_err(|error| format!("无法安全保存{label}：{error}"))
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_replace_and_failed_save_preserve_existing_data() {
+        let root = std::env::temp_dir().join(new_id("tao-storage-test"));
+        let path = root.join("data.json");
+        write_json(&path, &vec!["old"], "测试").unwrap();
+        write_json(&path, &vec!["new"], "测试").unwrap();
+        assert_eq!(serde_json::from_str::<Vec<String>>(&fs::read_to_string(&path).unwrap()).unwrap(), vec!["new"]);
+        let directory_target = root.join("existing-directory");
+        fs::create_dir(&directory_target).unwrap();
+        assert!(write_json(&directory_target, &vec!["bad"], "测试").is_err());
+        assert!(directory_target.is_dir());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_conversation_is_reported_without_altering_file() {
+        let root = std::env::temp_dir().join(new_id("tao-corrupt-test"));
+        fs::create_dir_all(root.join("chat-1")).unwrap();
+        let path = root.join("chat-1/conversation.json");
+        fs::write(&path, "{broken").unwrap();
+        assert!(read_conversation_file(&path).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "{broken");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

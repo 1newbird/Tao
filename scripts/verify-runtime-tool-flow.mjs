@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { once } from "node:events";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
 const root = resolve(process.cwd());
 const piRoot = join(root, "vendor", "pi");
@@ -89,11 +91,16 @@ async function createGateway() {
     const isSlowRequest = /慢速|停止测试/i.test(userText);
     const isRetryRequest = /重试测试/i.test(userText);
     const isTimeoutRequest = /超时测试/i.test(userText);
+    const isProfileRequest = /组合测试/.test(userText);
+    const isProcessRequest = /程序参数测试/.test(userText);
+    const isScopeRequest = /权限范围测试/.test(userText);
+    const isCancelProcessRequest = /程序取消测试/.test(userText);
     const requestId = `mock-${gatewayRequests.length + 1}`;
     gatewayRequests.push({
       userText,
       hasToolResult,
       toolResultText: toolMessages.map((message) => messageText(message.content)).join("\n"),
+      systemText: messages.filter((message) => ["system", "developer"].includes(message.role)).map((message) => messageText(message.content)).join("\n"),
       tools: Array.isArray(payload.tools)
         ? payload.tools.map((tool) => tool?.function?.name).filter((name) => typeof name === "string")
         : [],
@@ -125,6 +132,18 @@ async function createGateway() {
       if (hasToolResult) {
         writeSse(response, terminalChunk("本地工具流程已完成。", requestId));
         writeSse(response, terminalChunk("", requestId));
+      } else if (isProfileRequest) {
+        writeSse(response, terminalChunk("组合测试完成。", requestId));
+        writeSse(response, terminalChunk("", requestId));
+      } else if (isCancelProcessRequest) {
+        writeSse(response, toolCallChunk("slow_write", JSON.stringify({ text: "cancel" }), requestId));
+        writeSse(response, terminalChunk("", requestId, "tool_calls"));
+      } else if (isProcessRequest) {
+        writeSse(response, toolCallChunk("echo_json", JSON.stringify({ text: 'quoted " & > ignored | $(fake)' }), requestId));
+        writeSse(response, terminalChunk("", requestId, "tool_calls"));
+      } else if (isScopeRequest) {
+        writeSse(response, toolCallChunk("write", JSON.stringify({ path: "linked/new.txt", content: "must-not-write" }), requestId));
+        writeSse(response, terminalChunk("", requestId, "tool_calls"));
       } else if (isEditRequest) {
         writeSse(response, terminalChunk("我先检查一下要修改的文件。\n", requestId, null));
         writeSse(response, toolCallChunk("edit", "{\"path\":\"editable.txt\",\"edits\":[{\"oldText\":\"before\\n\",\"newText\":\"after\\n\"}]}", requestId));
@@ -155,6 +174,8 @@ async function writeFixture(baseUrl) {
   await mkdir(join(taoHome, "sessions"), { recursive: true });
   await mkdir(workspaceA, { recursive: true });
   await mkdir(workspaceB, { recursive: true });
+  await mkdir(join(tempRoot, "outside"));
+  await symlink(join(tempRoot, "outside"), join(workspaceA, "linked"), process.platform === "win32" ? "junction" : "dir");
   await writeFile(join(workspaceA, "fixture.txt"), "TAO_PRIVATE_TOOL_RESULT_MUST_NOT_REACH_UI\n", "utf8");
   await writeFile(join(workspaceB, "fixture.txt"), "TAO_PRIVATE_TOOL_RESULT_MUST_NOT_REACH_UI\n", "utf8");
   await writeFile(join(workspaceA, "editable.txt"), "before\n", "utf8");
@@ -187,8 +208,8 @@ async function writeFixture(baseUrl) {
 
 async function startRuntime() {
   const preflight = join(piRoot, "node_modules", "tsx", "dist", "preflight.cjs");
-  const loader = `file:///${join(piRoot, "node_modules", "tsx", "dist", "loader.mjs").replaceAll("\\", "/")}`;
-  const child = spawn("node.exe", [
+  const loader = pathToFileURL(join(piRoot, "node_modules", "tsx", "dist", "loader.mjs")).href;
+  const child = spawn(process.execPath, [
     "--require", preflight,
     "--import", loader,
     runtimeScript,
@@ -218,6 +239,10 @@ async function startRuntime() {
     if (message.type === "fatal") fatal = message.message;
     if (message.type === "event") {
       events.push(message.payload);
+      if (message.payload.category === "permission" && message.payload.event === "requested") {
+        // This local fixture deliberately approves the requested test actions.
+        child.stdin.write(`${JSON.stringify({ id: `permission-${message.payload.permissionId}`, type: "permission_response", conversationId: message.payload.conversationId, permissionId: message.payload.permissionId, decision: "allow_once" })}\n`);
+      }
     }
     if (message.type === "response") {
       const pending = responses.get(message.id);
@@ -291,6 +316,58 @@ try {
   runtime = await startRuntime();
   await runtime.waitForReady();
 
+  const profile = (systemPrompt, enabledTools, customTools = [], toolPermissions = {}) => ({ enabled: true, systemPromptMode: "replace", systemPrompt, conversationPrompt: "", toolMode: "custom", enabledTools, customTools, toolPermissions });
+  const alpha = { ...prompt("profile-alpha", "profile-alpha-1", "组合测试 Alpha", workspaceA), runtimeConfiguration: profile("ALPHA_PROFILE_ONLY", ["read"]) };
+  const beta = { ...prompt("profile-beta", "profile-beta-1", "组合测试 Beta", workspaceB), runtimeConfiguration: profile("BETA_PROFILE_ONLY", []) };
+  await Promise.all([runtime.request(alpha), runtime.request(beta)]);
+  await mkdir(join(taoHome, "runtime"), { recursive: true });
+  await writeFile(join(taoHome, "runtime/profile.json"), JSON.stringify(profile("GLOBAL_CHANGE_MUST_NOT_APPLY", [])));
+  await runtime.request({ ...alpha, requestId: "profile-alpha-2", message: "组合测试 Alpha 再次" });
+  const alphaRequests = gatewayRequests.filter((request) => request.userText.includes("组合测试 Alpha"));
+  assert(alphaRequests.length === 2 && alphaRequests.every((request) => request.systemText.includes("ALPHA_PROFILE_ONLY") && !request.systemText.includes("BETA_PROFILE_ONLY") && !request.systemText.includes("GLOBAL_CHANGE_MUST_NOT_APPLY") && request.tools.join(",") === "read"), "Alpha 组合配置未隔离或被全局编辑改变");
+  assert(gatewayRequests.some((request) => request.userText.includes("组合测试 Beta") && request.systemText.includes("BETA_PROFILE_ONLY") && request.tools.length === 0), "Beta 无工具组合没有独立生效");
+  await rm(join(taoHome, "runtime/profile.json"));
+
+  const processTool = { id: "echo", name: "echo_json", label: "程序参数", kind: "process", enabled: true, permissionMode: "ask", executable: "node", arguments: JSON.stringify(["-e", "process.stdout.write(process.argv[1])", "{{text}}"]), timeoutMs: 1000, inputSchema: JSON.stringify({ type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false }) };
+  await runtime.request({ ...prompt("process-tool", "process-tool-1", "程序参数测试", workspaceA), permissionMode: "full_access", runtimeConfiguration: profile("Process test", [], [processTool]) });
+  assert(gatewayRequests.some((request) => request.userText.includes("程序参数测试") && request.toolResultText === 'quoted " & > ignored | $(fake)'), `程序参数没有作为独立参数传递：${JSON.stringify(gatewayRequests.filter((request) => request.userText.includes("程序参数测试")))}`);
+  assert(runtime.events.some((event) => event.conversationId === "process-tool" && event.category === "permission" && event.event === "requested"), "工具询问规则被完全放行绕过");
+  const invalidInput = await runtime.request({ type: "test_custom_tool", tool: processTool, input: "{}", workspacePath: workspaceA }).then(() => "").catch((error) => String(error));
+  assert(/validation|text/i.test(invalidInput), "工具测试未验证输入 Schema");
+  const wrongHost = await runtime.request({ type: "test_custom_tool", tool: { ...processTool, kind: "http", url: "https://example.org/", allowedHosts: ["example.com"], headers: "" }, input: '{"text":"test"}', workspacePath: workspaceA }).then(() => "").catch((error) => String(error));
+  assert(wrongHost.includes("允许的域名"), "HTTP 工具未拒绝范围外主机");
+  const timedProcess = await runtime.request({ type: "test_custom_tool", tool: { ...processTool, arguments: '["-e","setTimeout(() => {}, 20000)"]' }, input: '{"text":"test"}', workspacePath: workspaceA }).then(() => "").catch((error) => String(error));
+  assert(/abort|timeout|killed|取消|超时/i.test(timedProcess), "自定义程序未按超时取消");
+  const delayedChild = (file) => `require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify("setTimeout(() => require('fs').writeFileSync('" + file + "', 'bad'), 1500)")}], { stdio: 'inherit' }); setTimeout(() => {}, 20000);`;
+  await writeFile(join(workspaceA, "timeout-tree.cjs"), delayedChild("timed-out-child.txt"));
+  const shellTimeout = await runtime.request({ type: "test_custom_tool", tool: { ...processTool, kind: "command", command: `"${process.execPath}" timeout-tree.cjs` }, input: '{"text":"test"}', workspacePath: workspaceA }).then(() => "").catch((error) => String(error));
+  assert(/取消|超时/i.test(shellTimeout), "Shell 工具未按超时停止");
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 1600));
+  assert(!existsSync(join(workspaceA, "timed-out-child.txt")), "Shell 超时后子进程仍执行了写操作");
+
+  await runtime.request({ ...prompt("deny-read", "deny-read-1", "请读取 fixture.txt", workspaceA), permissionMode: "full_access", runtimeConfiguration: profile("deny", ["read"], [], { read: { mode: "deny", pathScope: "any" } }) });
+  assert(gatewayRequests.some((request) => request.toolResultText.includes("此组合禁止使用该工具")), "组合禁止规则未优先执行");
+  await runtime.request({ ...prompt("scope-write", "scope-write-1", "权限范围测试", workspaceA), permissionMode: "full_access", runtimeConfiguration: profile("scope", ["write"], [], { write: { mode: "allow", pathScope: "workspace" } }) });
+  assert(!existsSync(join(tempRoot, "outside/new.txt")), "工作区范围限制被目录链接绕过");
+
+  const earlyPrompt = runtime.request({ ...prompt("cancel-preparing", "cancel-preparing-1", "组合测试 不应调用模型", workspaceA), runtimeConfiguration: profile("cancel", []) }).catch(() => null);
+  await runtime.request({ type: "cancel_active", conversationId: "cancel-preparing" });
+  await earlyPrompt;
+  assert(!gatewayRequests.some((request) => request.userText.includes("不应调用模型")), "准备期间取消的请求仍调用了模型");
+
+  const slowTool = { ...processTool, name: "slow_write", permissionMode: "allow", arguments: JSON.stringify(["-e", delayedChild("cancelled-write.txt")]), timeoutMs: 30000 };
+  const cancelledProcess = runtime.request({ ...prompt("cancel-process", "cancel-process-1", "程序取消测试", workspaceA), runtimeConfiguration: profile("cancel-process", [], [slowTool]) }).catch(() => null);
+  const waitStarted = Date.now();
+  while (!runtime.events.some((event) => event.conversationId === "cancel-process" && event.category === "tool" && event.event === "started") && Date.now() - waitStarted < 5000) await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  assert(runtime.events.some((event) => event.conversationId === "cancel-process" && event.category === "tool" && event.event === "started"), "取消测试的程序工具没有启动");
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+  await runtime.request({ type: "cancel_active", conversationId: "cancel-process" });
+  await cancelledProcess;
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 1600));
+  assert(!existsSync(join(workspaceA, "cancelled-write.txt")), "取消后工具进程仍执行了写操作");
+  await runtime.request({ ...prompt("cancel-process", "cancel-process-2", "组合测试 取消后继续", workspaceA), runtimeConfiguration: profile("cancel-process", [], [slowTool]) });
+
+  const baselineStart = gatewayRequests.length;
   const [readResult, listResult] = await Promise.all([
     runtime.request(prompt("conversation-read", "request-read", "请读取 fixture.txt", workspaceA)),
     runtime.request(prompt("conversation-list", "request-list", "请列出当前目录", workspaceB)),
@@ -354,7 +431,7 @@ try {
     && event.action === "execute_command"
     && event.text?.startsWith("正在执行命令"),
   );
-  const initialToolSets = gatewayRequests.filter((request) => !request.hasToolResult).map((request) => request.tools);
+  const initialToolSets = gatewayRequests.slice(baselineStart).filter((request) => !request.hasToolResult).map((request) => request.tools);
   assert(
     commandStatusObserved,
     `没有收到已路由的 bash 工具状态：${JSON.stringify(runtime.events.filter((event) => event.conversationId === "conversation-list"))}`,
@@ -414,6 +491,13 @@ try {
     providerTimeoutErrorObserved: true,
     piDefaultToolsObserved: ["read", "bash", "edit", "write"],
     toolResultKeptOutOfRuntimeEvents: true,
+    profileSnapshotsIsolated: true,
+    structuredProcessArguments: true,
+    schemaAndHttpScopeValidated: true,
+    explicitPermissionRulesEnforced: true,
+    junctionWriteBlocked: true,
+    preparationCancellationVerified: true,
+    activeToolCancellationVerified: true,
     piContinuedAfterToolResult: true,
   }));
 } finally {

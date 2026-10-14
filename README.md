@@ -1,14 +1,14 @@
 # Tao
 
-Tao 是一个面向 Windows 10/11 x64 的桌面 AI Agent 工作台，使用 Tauri 作为桌面壳，内置并复用 Pi 作为 Agent 引擎。
+Tao 是一个面向 Windows 10/11 x64 的桌面智能体工作台，使用 Tauri 作为桌面壳，内置 Tao Runtime 和 Tao 智能体内核。
 
 ```text
-Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Pi Agent 内核
+Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Tao 智能体内核
 ```
 
 ## 重要说明
 
-- `vendor/pi` 是 Tao 仓库内的 Pi 固定源码快照，不是 Git submodule。
+- Tao 内核基于 Pi 的固定源码快照，保留在 `vendor/pi`，不是 Git submodule；原始来源和许可证保留。
 - 本仓库不跟踪 Pi 上游最新代码。
 - 后续如果修改 Pi 代码，直接在本仓库提交，把它视为 Tao 自己的源码。
 - 使用者不需要另外安装、下载或更新 Pi。
@@ -52,12 +52,24 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 `npm.cmd run tauri dev` 会先启动 Vite 前端，再编译并启动 Rust 桌面应用。
 
+## 智能体定制
+
+在“定制”页新建或复制组合，设置系统提示词、工具选择、Skill 开关和工具权限后保存。工具定义放在共享工具库中，组合保存工具引用；可导出组合 JSON，再在另一台电脑导入。
+
+对话顶部可以选择当前会话的组合，也可以将其设为项目默认。已有会话固定使用保存的配置快照；编辑组合后，需要在该会话点击“应用新版”才会更新。切换组合会保留已有上下文，需要独立上下文时新建测试会话。
+
+自定义工具支持程序与独立参数、Shell 和 HTTP。程序参数支持 `{{字段名}}`，`{{input}}` 表示完整输入 JSON；HTTP 请求头支持 `{{env:变量名}}` 凭据引用。工具可设为询问、允许或禁止，内置文件工具可限制到工作区。这些权限规则尚未提供操作系统沙盒隔离。
+
+组合和工具库存放于 `%USERPROFILE%\.tao\agents\catalog.json`，旧 `runtime/profile.json` 在首次使用时自动迁移并保留原文件。详细操作见[智能体组合与工具使用](docs/项目手册/10-智能体组合与工具使用.md)。
+
 ## 常用命令
 
 | 命令 | 作用 |
 |---|---|
 | `npm.cmd run dev` | 只启动 Vite 前端 |
+| `npm.cmd run preview:ui` | 使用内存模拟数据预览实际 UI，不连接模型或读写真实用户数据 |
 | `npm.cmd run check` | TypeScript 类型检查和 Rust `cargo check` |
+| `npm.cmd run test:agents` | 组合迁移、版本隔离、权限、工具执行与取消回归；模型服务使用本地模拟 |
 | `npm.cmd run build` | 构建前端 |
 | `npm.cmd run tauri dev` | 启动完整 Tauri 开发模式 |
 | `npm.cmd run tao:prepare` | 生成发布资源，不打安装包 |

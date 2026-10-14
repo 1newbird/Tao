@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import "./profile-ui.css";
+import { catalogWithEditor, editorConfiguration, emptyConfiguration, exportProfile, mergeCatalog, safeSnapshot, workspaceKey } from "./agent-profiles";
+import type { AgentCatalog, AgentProfile, AgentSnapshot, CustomToolConfiguration, CustomToolPermissionMode, RuntimeConfiguration, ToolPermissionConfiguration } from "./agent-profiles";
+import { AgentIcon, ConversationProfileMenu, ProfileActionMenu } from "./ProfileMenu";
 
 type MessageRole = "user" | "assistant" | "error";
 
@@ -33,6 +37,7 @@ interface RetryConfiguration {
   baseUrl: string;
   api: AppSettings["api"];
   thinkingLevel: AppSettings["thinkingLevel"];
+  agentSnapshot?: AgentSnapshot | null;
 }
 
 type PermissionMode = "ask" | "full_access";
@@ -50,6 +55,7 @@ interface Conversation {
   workspacePath: string;
   workspaceName: string;
   messages: Message[];
+  agentSnapshot?: AgentSnapshot | null;
 }
 
 interface AppSettings {
@@ -84,36 +90,10 @@ interface AppState {
   conversations: Conversation[];
   settings: AppSettings;
   runtimeConfiguration: RuntimeConfiguration;
+  agentCatalog: AgentCatalog;
+  storageWarnings: string[];
   apiKeyConfigured: boolean;
   providerAuthConfigured: Record<string, boolean>;
-}
-
-interface RuntimeConfiguration {
-  enabled: boolean;
-  systemPromptMode: "append" | "replace";
-  systemPrompt: string;
-  conversationPrompt: string;
-  toolMode: "default" | "custom";
-  enabledTools: string[];
-  skillsEnabled: boolean;
-  extensionsEnabled: boolean;
-  customTools: CustomToolConfiguration[];
-}
-
-interface CustomToolConfiguration {
-  id: string;
-  name: string;
-  label: string;
-  description: string;
-  kind: "command" | "http";
-  enabled: boolean;
-  permissionMode: CustomToolPermissionMode;
-  command: string;
-  method: string;
-  url: string;
-  headers: string;
-  bodyTemplate: string;
-  inputSchema: string;
 }
 
 interface SaveSettingsResult {
@@ -253,7 +233,6 @@ type CustomizationSection = "overview" | "prompt" | "context" | "session" | "age
 type SettingsSection = "models" | "appearance" | "language" | "data" | "runtime" | "about";
 type AccentColor = "tao" | "developer" | "ocean" | "amber" | "graphite";
 type ThemeMode = "light" | "dark" | "system";
-type CustomToolPermissionMode = "ask" | "allow" | "deny";
 
 const BUILTIN_TOOL_OPTIONS = [
   ["read", "读取文件"],
@@ -304,14 +283,18 @@ const DEFAULT_CUSTOM_TOOL_SCHEMA = JSON.stringify({
 function newCustomToolConfiguration(index: number): CustomToolConfiguration {
   const suffix = index > 1 ? `_${index}` : "";
   return {
-    id: `custom_tool${suffix}`,
+    id: `tool-${crypto.randomUUID()}`,
     name: `custom_tool${suffix}`,
     label: "自定义工具",
     description: "由 Tao 调用的自定义工具。",
-    kind: "command",
+    kind: "process",
     enabled: true,
     permissionMode: "ask",
-    command: "echo {{input}}",
+    command: "",
+    executable: "node",
+    arguments: JSON.stringify(["-e", "console.log(process.env.TAO_TOOL_INPUT_JSON)"], null, 2),
+    timeoutMs: 120000,
+    allowedHosts: [],
     method: "GET",
     url: "",
     headers: "",
@@ -1610,22 +1593,22 @@ function App() {
   const [mainView, setMainView] = useState<MainView>("chat");
   const [customizationSection, setCustomizationSection] = useState<CustomizationSection>("overview");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
-  const [runtimeConfiguration, setRuntimeConfiguration] = useState<RuntimeConfiguration>({
-    enabled: true,
-    systemPromptMode: "append",
-    systemPrompt: "",
-    conversationPrompt: "",
-    toolMode: "default",
-    enabledTools: [...BUILTIN_TOOL_OPTIONS.map(([name]) => name)],
-    skillsEnabled: false,
-    extensionsEnabled: false,
-    customTools: [],
-  });
-  const [runtimeDraft, setRuntimeDraft] = useState(runtimeConfiguration);
+  const [runtimeDraft, setRuntimeDraft] = useState<RuntimeConfiguration>(emptyConfiguration);
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalog>({ schemaVersion: 1, revision: 1, defaultProfileId: "default", profiles: [], tools: [], workspaceDefaults: [] });
+  const [catalogDraft, setCatalogDraft] = useState(agentCatalog);
+  const [selectedProfileId, setSelectedProfileId] = useState("default");
+  const [catalogSaving, setCatalogSaving] = useState(false);
+  const [profileImportOpen, setProfileImportOpen] = useState(false);
+  const [profileImportText, setProfileImportText] = useState("");
+  const editedCatalog = useMemo(() => catalogWithEditor(catalogDraft, selectedProfileId, runtimeDraft), [catalogDraft, selectedProfileId, runtimeDraft]);
+  const editorProfile = catalogDraft.profiles.find((profile) => profile.id === selectedProfileId);
+  const catalogDirty = useMemo(() => JSON.stringify(editedCatalog) !== JSON.stringify(agentCatalog), [editedCatalog, agentCatalog]);
   const [messageAttachments, setMessageAttachments] = useState<AttachmentReference[]>([]);
   const [customToolTestInput, setCustomToolTestInput] = useState("{}");
   const [customToolTestOutput, setCustomToolTestOutput] = useState("");
   const [testingCustomToolId, setTestingCustomToolId] = useState<string | null>(null);
+  const [lastTestToolId, setLastTestToolId] = useState<string | null>(null);
+  const [expandedCustomToolId, setExpandedCustomToolId] = useState<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>({ conversationId: null, text: "" });
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<{ ok: boolean; text: string } | null>(null);
@@ -1847,7 +1830,7 @@ function App() {
     let content = "";
     let extension = "txt";
     if (format === "json") {
-      content = JSON.stringify(activeConversation, null, 2);
+      content = JSON.stringify({ ...activeConversation, agentSnapshot: safeSnapshot(activeConversation.agentSnapshot), messages: activeConversation.messages.map((message) => ({ ...message, retry: message.retry ? { ...message.retry, agentSnapshot: safeSnapshot(message.retry.agentSnapshot) } : undefined })) }, null, 2);
       extension = "json";
     } else if (format === "markdown") {
       content = [
@@ -1902,9 +1885,6 @@ function App() {
       setNotice({ conversationId: null, text: "" });
       return;
     }
-    if (view === "customization") {
-      setRuntimeDraft(runtimeConfiguration);
-    }
     setMainView(view);
     setNotice({ conversationId: null, text: "" });
   }
@@ -1924,8 +1904,11 @@ function App() {
         activeIdRef.current = initialId;
         setActiveId(initialId);
         setSettings(state.settings);
-        setRuntimeConfiguration(state.runtimeConfiguration);
-        setRuntimeDraft(state.runtimeConfiguration);
+        setAgentCatalog(state.agentCatalog);
+        setCatalogDraft(state.agentCatalog);
+        setSelectedProfileId(state.agentCatalog.defaultProfileId);
+        setRuntimeDraft(editorConfiguration(state.agentCatalog, state.agentCatalog.defaultProfileId));
+        if (state.storageWarnings.length) setNotice({ conversationId: null, text: `部分会话未能恢复，原文件已保留。${state.storageWarnings.join("；")}` });
         setApiKeyConfigured(state.apiKeyConfigured);
         setProviderAuthConfigured(state.providerAuthConfigured);
         setSelectedSettingsProvider(state.settings.provider);
@@ -2296,6 +2279,7 @@ function App() {
     permissionRequest && permissionRequest.conversationId !== activeId,
   );
   const activeWorkspacePath = activeConversation?.workspacePath ?? "";
+  const projectAgentDefault = agentCatalog.workspaceDefaults.find((item) => item.workspacePath === workspaceKey(activeWorkspacePath));
   const lastAssistantMessage = useMemo(() => {
     if (!activeConversation) return undefined;
     for (let index = activeConversation.messages.length - 1; index >= 0; index -= 1) {
@@ -2411,7 +2395,7 @@ function App() {
         ? `${startupStatus} · Runtime 后台启动中`
         : `${startupStatus} · Runtime 正在重连`
     : mainView === "customization"
-      ? "设计 Tao Runtime 的行为、上下文和扩展"
+      ? "管理智能体组合、提示词和工具"
       : "管理 Tao 的全局配置";
 
   useEffect(() => {
@@ -2958,25 +2942,133 @@ function App() {
     }
   }
 
-  async function saveRuntimeConfiguration() {
-    if (anyConversationGenerating || anyConversationPreparing) {
-      setNotice({ conversationId: null, text: "请等待所有会话运行完成后再保存 Runtime 配置。" });
-      return;
-    }
+  async function saveRuntimeConfiguration(): Promise<AgentCatalog | null> {
+    if (catalogSaving) return null;
+    setCatalogSaving(true);
     try {
-      const saved = await invoke<RuntimeConfiguration>("save_runtime_configuration", {
-        configuration: runtimeDraft,
-      });
-      setRuntimeConfiguration(saved);
-      setRuntimeDraft(saved);
-      setNotice({ conversationId: null, text: "Runtime 提示词配置已保存。" });
-      if (activeConversation) {
-        setStartupStatus("已可输入");
-        void prepareConversation(activeConversation);
-      }
+      const saved = await invoke<AgentCatalog>("save_agent_catalog", { catalog: editedCatalog });
+      setAgentCatalog(saved);
+      setCatalogDraft(saved);
+      setRuntimeDraft(editorConfiguration(saved, selectedProfileId));
+      setNotice({ conversationId: null, text: "组合与工具库已保存。已有会话继续使用原版本，可在对话中明确应用新版。" });
+      return saved;
     } catch (error: unknown) {
-      setNotice({ conversationId: null, text: `无法保存 Runtime 配置：${String(error)}` });
+      setNotice({ conversationId: null, text: `无法保存组合：${String(error)}` });
+      return null;
+    } finally {
+      setCatalogSaving(false);
     }
+  }
+
+  function selectEditorProfile(id: string, catalog = editedCatalog) {
+    setCatalogDraft(catalog);
+    setSelectedProfileId(id);
+    setRuntimeDraft(editorConfiguration(catalog, id));
+    setCustomToolTestOutput("");
+  }
+
+  function addAgentProfile(copy = false) {
+    const original = editedCatalog.profiles.find((profile) => profile.id === selectedProfileId);
+    const profile: AgentProfile = copy && original ? { ...structuredClone(original), id: `agent-${crypto.randomUUID()}`, name: `${original.name} 副本`, revision: 0 } : { id: `agent-${crypto.randomUUID()}`, name: "新助手", description: "", revision: 0, configuration: emptyConfiguration(), customToolIds: [], defaultModel: null };
+    selectEditorProfile(profile.id, { ...editedCatalog, profiles: [...editedCatalog.profiles, profile] });
+    setCustomizationSection("overview");
+  }
+
+  function updateAgentProfile(patch: Partial<AgentProfile>) {
+    setCatalogDraft((current) => ({ ...current, profiles: current.profiles.map((profile) => profile.id === selectedProfileId ? { ...profile, ...patch } : profile) }));
+  }
+
+  function deleteAgentProfile() {
+    if (editedCatalog.profiles.length === 1 || selectedProfileId === editedCatalog.defaultProfileId) {
+      setNotice({ conversationId: null, text: "需保留默认组合，请先将其他组合设为默认。" }); return;
+    }
+    const catalog = { ...editedCatalog, profiles: editedCatalog.profiles.filter((profile) => profile.id !== selectedProfileId), workspaceDefaults: editedCatalog.workspaceDefaults.filter((item) => item.profileId !== selectedProfileId) };
+    selectEditorProfile(catalog.defaultProfileId, catalog);
+    setNotice({ conversationId: null, text: "组合已从草稿移除，保存后生效。已有会话保留原配置。" });
+  }
+
+  async function reloadAgentCatalog() {
+    try {
+      const catalog = await invoke<AgentCatalog>("get_agent_catalog");
+      setAgentCatalog(catalog);
+      selectEditorProfile(catalog.profiles.some((profile) => profile.id === selectedProfileId) ? selectedProfileId : catalog.defaultProfileId, catalog);
+      setNotice({ conversationId: null, text: "已重新读取保存的配置。" });
+    } catch (error: unknown) { setNotice({ conversationId: null, text: `读取失败：${String(error)}` }); }
+  }
+
+  async function exportAgentProfile() {
+    try {
+      const path = await save({ defaultPath: `Tao-${sanitizeFileName(editorProfile?.name ?? "助手")}.json`, filters: [{ name: "Tao 组合", extensions: ["json"] }] });
+      if (!path) return;
+      await invoke("write_export_file", { path, content: JSON.stringify(exportProfile(editedCatalog, selectedProfileId), null, 2) });
+      setNotice({ conversationId: null, text: "组合已导出；常见凭据字段已脱敏，环境变量引用保留。" });
+    } catch (error: unknown) { setNotice({ conversationId: null, text: `导出失败：${String(error)}` }); }
+  }
+
+  async function importAgentProfiles() {
+    try {
+      const imported = await invoke<AgentCatalog>("parse_agent_catalog", { content: profileImportText });
+      const merged = mergeCatalog(editedCatalog, imported);
+      selectEditorProfile(merged.profiles[merged.profiles.length - 1]?.id ?? merged.defaultProfileId, merged);
+      setProfileImportOpen(false);
+      setProfileImportText("");
+      setNotice({ conversationId: null, text: "已导入到草稿，请检查提示词、工具和权限后保存。" });
+    } catch (error: unknown) { setNotice({ conversationId: null, text: `导入失败：${String(error)}` }); }
+  }
+
+  async function importAgentProfilesFile() {
+    try {
+      const imported = await invoke<AgentCatalog | null>("choose_agent_catalog");
+      if (!imported) return;
+      const merged = mergeCatalog(editedCatalog, imported);
+      selectEditorProfile(merged.profiles[merged.profiles.length - 1]?.id ?? merged.defaultProfileId, merged);
+      setNotice({ conversationId: null, text: "已导入到草稿，请检查配置和权限后保存。" });
+    } catch (error: unknown) { setNotice({ conversationId: null, text: `导入失败：${String(error)}` }); }
+  }
+
+  async function setConversationAgent(profileId: string) {
+    if (!activeConversation || generatingRef.current.has(activeId) || preparingRef.current.has(activeId)) return;
+    const id = activeConversation.id;
+    preparingRef.current.add(id);
+    setPreparingIds((current) => ({ ...current, [id]: true }));
+    let updated: Conversation | undefined;
+    try {
+      updated = await invoke<Conversation>("set_conversation_agent", { conversationId: id, profileId });
+      setConversations((current) => current.map((conversation) => conversation.id === id ? updated! : conversation));
+      setNotice({ conversationId: id, text: "组合已应用到后续对话；已有消息保留，若需独立上下文可新建会话。" });
+    } catch (error: unknown) { setNotice({ conversationId: id, text: `切换组合失败：${String(error)}` }); }
+    finally {
+      preparingRef.current.delete(id);
+      setPreparingIds((current) => { const next = { ...current }; delete next[id]; return next; });
+    }
+    if (updated) void prepareConversation(updated);
+  }
+
+  async function setProjectAgentDefault(profileId = activeConversation?.agentSnapshot?.profileId ?? "") {
+    if (!activeConversation?.workspacePath || !activeConversation.agentSnapshot) return;
+    try {
+      const saved = await invoke<AgentCatalog>("set_workspace_agent_default", { workspacePath: activeConversation.workspacePath, profileId });
+      setAgentCatalog(saved);
+      setCatalogDraft((current) => ({ ...current, revision: saved.revision, workspaceDefaults: saved.workspaceDefaults }));
+      setNotice({ conversationId: activeId, text: "项目默认组合已更新，新会话将使用最新版本。" });
+    } catch (error: unknown) { setNotice({ conversationId: activeId, text: `项目默认组合保存失败：${String(error)}` }); }
+  }
+
+  async function testAgentProfile() {
+    const saved = await saveRuntimeConfiguration();
+    if (!saved) return;
+    try {
+      const draft = await invoke<Conversation>("create_conversation_with_workspace", { workspacePath: activeWorkspacePath || null, workspaceName: activeConversation?.workspaceName || null });
+      const conversation = await invoke<Conversation>("set_conversation_agent", { conversationId: draft.id, profileId: selectedProfileId });
+      setConversations((current) => sortConversations([conversation, ...current]));
+      activeIdRef.current = conversation.id;
+      setActiveId(conversation.id);
+      setMainView("chat");
+      setInput("");
+      setMessageAttachments([]);
+      setNotice({ conversationId: conversation.id, text: "测试会话已创建，发送消息即可验证当前组合。" });
+      void prepareConversation(conversation);
+    } catch (error: unknown) { setNotice({ conversationId: null, text: `无法创建测试会话：${String(error)}` }); }
   }
 
   function updateRuntimeDraft(patch: Partial<RuntimeConfiguration>) {
@@ -2992,22 +3084,31 @@ function App() {
       draft = newCustomToolConfiguration(index);
     }
     updateRuntimeDraft({ customTools: [...existing, draft] });
+    setExpandedCustomToolId(draft.id);
     setCustomToolTestInput(JSON.stringify({ input: "测试输入" }, null, 2));
     setCustomToolTestOutput("");
   }
 
   function updateCustomTool(toolId: string, patch: Partial<CustomToolConfiguration>) {
-    updateRuntimeDraft({
-      customTools: (runtimeDraft.customTools ?? []).map((tool) =>
-        tool.id === toolId ? { ...tool, ...patch } : tool,
-      ),
+    setRuntimeDraft((current) => {
+      const old = current.customTools.find((tool) => tool.id === toolId);
+      const toolPermissions = { ...current.toolPermissions };
+      if (old && patch.name !== undefined && patch.name !== old.name && toolPermissions[old.name]) {
+        toolPermissions[patch.name] = toolPermissions[old.name];
+        delete toolPermissions[old.name];
+      }
+      return { ...current, toolPermissions, customTools: current.customTools.map((tool) => tool.id === toolId ? { ...tool, ...patch } : tool) };
     });
   }
 
   function removeCustomTool(toolId: string) {
+    if (editedCatalog.profiles.some((profile) => profile.id !== selectedProfileId && profile.customToolIds.includes(toolId))) {
+      setNotice({ conversationId: null, text: "其他组合正在使用此工具，请先在对应组合中取消选择并保存。" }); return;
+    }
     updateRuntimeDraft({
       customTools: (runtimeDraft.customTools ?? []).filter((tool) => tool.id !== toolId),
     });
+    if (expandedCustomToolId === toolId) setExpandedCustomToolId(null);
     if (testingCustomToolId === toolId) {
       setTestingCustomToolId(null);
       setCustomToolTestOutput("");
@@ -3016,6 +3117,7 @@ function App() {
 
   async function testCustomTool(tool: CustomToolConfiguration) {
     setTestingCustomToolId(tool.id);
+    setLastTestToolId(tool.id);
     setCustomToolTestOutput("");
     try {
       const result = await invoke<TestCustomToolResult>("test_custom_tool", {
@@ -3023,6 +3125,7 @@ function App() {
           tool,
           input: customToolTestInput,
           workspacePath: activeWorkspacePath || null,
+          permissionRule: runtimeDraft.toolPermissions[tool.name] ?? { mode: "inherit", pathScope: "any" },
         },
       });
       setCustomToolTestOutput(result.output);
@@ -3749,6 +3852,24 @@ function App() {
               </div>
             </div>
             <div className="header-actions">
+              {mainView === "chat" && activeConversation && (
+                <ConversationProfileMenu
+                  profiles={agentCatalog.profiles}
+                  value={activeConversation.agentSnapshot?.profileId ?? agentCatalog.defaultProfileId}
+                  name={activeConversation.agentSnapshot?.name ?? agentCatalog.profiles.find((profile) => profile.id === agentCatalog.defaultProfileId)?.name ?? "默认助手"}
+                  revision={activeConversation.agentSnapshot?.revision ?? 1}
+                  defaultProfileId={agentCatalog.defaultProfileId}
+                  projectProfileId={projectAgentDefault?.profileId}
+                  disabled={activeConversationGenerating || Boolean(preparingIds[activeId])}
+                  onSelect={(id) => void setConversationAgent(id)}
+                  actions={[
+                    ...agentCatalog.profiles.filter((profile) => profile.id === activeConversation.agentSnapshot?.profileId && profile.revision !== activeConversation.agentSnapshot.revision).map((profile) => ({ label: "应用新版组合", description: `更新至 v${profile.revision}，保留已有消息`, onSelect: () => void setConversationAgent(profile.id) })),
+                    ...(activeWorkspacePath ? [{ label: "设为项目默认", description: `当前默认：${agentCatalog.profiles.find((profile) => profile.id === (projectAgentDefault?.profileId ?? agentCatalog.defaultProfileId))?.name ?? "全局默认"}`, disabled: !agentCatalog.profiles.some((profile) => profile.id === activeConversation.agentSnapshot?.profileId), onSelect: () => void setProjectAgentDefault() }] : []),
+                    ...(projectAgentDefault ? [{ label: "恢复全局默认", onSelect: () => void setProjectAgentDefault("") }] : []),
+                    { label: "管理智能体组合", onSelect: () => { setMainView("customization"); setCustomizationSection("overview"); } },
+                  ]}
+                />
+              )}
               {mainView === "chat" && (
                 <span className={`header-runtime-status ${activeConversationGenerating ? "active" : ""}`}>
                   {activeConversationGenerating
@@ -4167,55 +4288,83 @@ function App() {
         </>}
 
         {mainView === "customization" && (
-          <section className="workspace-page">
-            <nav className="workspace-subnav" aria-label="定制分类">
-              <div className="workspace-subnav-title">Tao Runtime</div>
-              {([
-                ["overview", "概览"],
-                ["prompt", "系统提示词"],
-                ["context", "上下文"],
-                ["session", "会话策略"],
-                ["agent", "工具"],
-                ["skills", "Skill"],
-                ["extensions", "Extension"],
-              ] as Array<[CustomizationSection, string]>).map(([section, label]) => (
-                <button
-                  className={customizationSection === section ? "active" : ""}
-                  key={section}
-                  type="button"
-                  onClick={() => setCustomizationSection(section)}
-                >
-                  {label}
-                  {!(["overview", "prompt", "agent", "skills"] as CustomizationSection[]).includes(section) && <small>规划中</small>}
-                </button>
-              ))}
-            </nav>
-            <div className="workspace-content">
-              {notice.text && notice.conversationId === null && <div className="workspace-notice">{notice.text}</div>}
+          <section className="workspace-page customization-page">
+            <aside className="customization-sidebar">
+              <div className="profile-library-heading"><span>智能体组合</span><span className="profile-count">{catalogDraft.profiles.length}</span><button type="button" aria-label="新建组合" title="新建组合" disabled={catalogSaving || testingCustomToolId !== null} onClick={() => addAgentProfile()}>+</button></div>
+              <div className="profile-library" aria-label="选择要编辑的组合">
+                {catalogDraft.profiles.map((profile) => (
+                  <button className={`profile-library-item ${selectedProfileId === profile.id ? "selected" : ""}`} type="button" key={profile.id} aria-pressed={selectedProfileId === profile.id} disabled={catalogSaving || testingCustomToolId !== null} title={profile.name} onClick={() => selectEditorProfile(profile.id)}>
+                    <span className="profile-avatar"><AgentIcon /></span>
+                    <span className="profile-library-copy"><strong>{profile.name || "未命名组合"}</strong><small>{profile.id === catalogDraft.defaultProfileId ? "全局默认" : profile.description || "自定义组合"}</small></span>
+                  </button>
+                ))}
+              </div>
+              <nav className="workspace-subnav profile-section-nav" aria-label="定制分类">
+                <div className="workspace-subnav-title">配置</div>
+                {([
+                  ["overview", "组合设置"],
+                  ["prompt", "系统提示词"],
+                  ["agent", "工具与权限"],
+                  ["skills", "Skills"],
+                  ["context", "上下文"],
+                  ["session", "会话策略"],
+                  ["extensions", "Extension"],
+                ] as Array<[CustomizationSection, string]>).map(([section, label]) => (
+                  <button className={customizationSection === section ? "active" : ""} key={section} type="button" aria-current={customizationSection === section ? "page" : undefined} onClick={() => setCustomizationSection(section)}>
+                    <span>{label}</span>{!(["overview", "prompt", "agent", "skills"] as CustomizationSection[]).includes(section) && <small>规划中</small>}
+                  </button>
+                ))}
+              </nav>
+              <div className="profile-library-footer">
+                <ProfileActionMenu label="导入组合" disabled={catalogSaving || testingCustomToolId !== null} actions={[
+                  { label: "从文件导入", onSelect: () => void importAgentProfilesFile() },
+                  { label: "粘贴 JSON 导入", onSelect: () => setProfileImportOpen((current) => !current) },
+                ]}><span>↓</span><span>导入组合</span></ProfileActionMenu>
+              </div>
+            </aside>
+            <div className="customization-main">
+              <fieldset className="agent-editor" disabled={catalogSaving || testingCustomToolId !== null}>
+              <header className="profile-editor-header">
+                <div className="profile-editor-identity"><span className="profile-avatar large"><AgentIcon /></span><div><div className="profile-editor-title"><h2 title={editorProfile?.name}>{editorProfile?.name || "未命名组合"}</h2><span className="profile-version">{editorProfile?.revision ? `v${editorProfile.revision}` : "草稿"}</span>{catalogDraft.defaultProfileId === selectedProfileId && <span className="profile-default-badge">默认</span>}</div><p>{editorProfile?.description || "设置提示词、工具和能力，创建你的智能体组合。"}</p></div></div>
+                <ProfileActionMenu label="组合操作" disabled={catalogSaving || testingCustomToolId !== null} actions={[
+                  { label: "复制组合", onSelect: () => addAgentProfile(true) },
+                  { label: "导出组合", onSelect: () => void exportAgentProfile() },
+                  { label: "重新读取（放弃更改）", onSelect: () => void reloadAgentCatalog() },
+                  { label: "删除组合", danger: true, disabled: editedCatalog.profiles.length === 1 || selectedProfileId === editedCatalog.defaultProfileId, onSelect: deleteAgentProfile },
+                ]}><svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="4" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="16" cy="10" r="1" /></svg></ProfileActionMenu>
+              </header>
+              <div className="workspace-content customization-content">
+              {notice.text && notice.conversationId === null && <div className="workspace-notice" role="status">{notice.text}</div>}
+              {profileImportOpen && <section className="profile-import-panel"><div className="profile-import-heading"><strong>导入智能体组合</strong><button type="button" className="text-button" onClick={() => setProfileImportOpen(false)}>取消</button></div><label className="setting-field"><span>组合 JSON</span><textarea rows={8} value={profileImportText} onChange={(event) => setProfileImportText(event.currentTarget.value)} placeholder="粘贴导出的 Tao 组合 JSON" /><small>导入后可继续编辑，保存前请检查工具权限和凭据引用。</small></label><button className="secondary-button compact-button" type="button" onClick={() => void importAgentProfiles()}>校验并导入</button></section>}
               {customizationSection === "overview" && (
-                <div className="workspace-section">
-                  <div className="workspace-heading">
-                    <span className="eyebrow">定制工作台</span>
-                    <h2>设计 Tao 的运行方式</h2>
-                    <p>这里负责把产品配置映射到已有的 Prompt、Context、Session、Skill 和 Extension 能力。</p>
-                  </div>
-                  <div className="capability-grid">
-                    <button type="button" onClick={() => setCustomizationSection("prompt")}>
-                      <strong>系统提示词</strong><span>已接入</span><p>追加或替换默认提示词，并设置会话约束。</p>
-                    </button>
-                    <button type="button" onClick={() => setCustomizationSection("context")}>
-                      <strong>上下文</strong><span>待接入</span><p>管理用户级、项目级上下文和注入顺序。</p>
-                    </button>
-                    <button type="button" onClick={() => setCustomizationSection("session")}>
-                      <strong>会话策略</strong><span>待接入</span><p>管理压缩、恢复、分支和会话生命周期。</p>
-                    </button>
-                    <button type="button" onClick={() => setCustomizationSection("agent")}>
-                      <strong>工具</strong><span>已接入</span><p>选择内置工具，并添加可以立即测试的自定义工具。</p>
-                    </button>
-                    <button type="button" onClick={() => setCustomizationSection("skills")}>
-                      <strong>Skills</strong><span>已接入</span><p>从 Tao 的统一数据目录加载项目能力说明。</p>
-                    </button>
-                  </div>
+                <div className="workspace-section profile-settings">
+                  <div className="workspace-heading"><h2>组合设置</h2><p>定义组合的基本信息，以及新会话使用的默认配置。</p></div>
+                  <section className="profile-form-group">
+                    <h3>基本信息</h3>
+                    <label className="setting-field"><span>组合名称</span><input maxLength={100} value={editorProfile?.name ?? ""} autoFocus={editorProfile?.revision === 0} placeholder="给组合起一个容易识别的名字" onChange={(event) => updateAgentProfile({ name: event.currentTarget.value })} /></label>
+                    <label className="setting-field"><span>说明 <em>可选</em></span><textarea className="profile-description-input" rows={2} maxLength={1000} value={editorProfile?.description ?? ""} placeholder="这个组合擅长什么，什么时候使用？" onChange={(event) => updateAgentProfile({ description: event.currentTarget.value })} /></label>
+                  </section>
+                  <section className="profile-form-group">
+                    <h3>新会话默认</h3>
+                    <div className="profile-default-row"><div><strong>全局默认组合</strong><p>未设置项目默认时，新会话使用此组合。</p></div><button className="secondary-button compact-button" type="button" disabled={catalogDraft.defaultProfileId === selectedProfileId} onClick={() => setCatalogDraft((current) => ({ ...current, defaultProfileId: selectedProfileId }))}>{catalogDraft.defaultProfileId === selectedProfileId ? "✓ 已设为默认" : "设为默认"}</button></div>
+                    <div className="two-column-settings">
+                      <label className="setting-field"><span>默认模型</span><select value={editorProfile?.defaultModel ? JSON.stringify([editorProfile.defaultModel.provider, editorProfile.defaultModel.model]) : ""} onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        if (!value) { updateAgentProfile({ defaultModel: null }); return; }
+                        const [provider, model] = JSON.parse(value) as [string, string];
+                        updateAgentProfile({ defaultModel: { provider, model, thinkingLevel: editorProfile?.defaultModel?.thinkingLevel ?? settings.thinkingLevel } });
+                      }}><option value="">继承全局模型设置</option>{editorProfile?.defaultModel && <option value={JSON.stringify([editorProfile.defaultModel.provider, editorProfile.defaultModel.model])}>{editorProfile.defaultModel.provider} / {editorProfile.defaultModel.model}（当前）</option>}{[...new Map([...models.map((model) => ({ provider: model.provider, id: model.id })), ...settings.providers.flatMap((provider) => provider.models.map((model) => ({ provider: provider.id, id: model.id })))].map((model) => [JSON.stringify([model.provider, model.id]), model])).entries()].map(([key, model]) => <option key={key} value={key}>{model.provider} / {model.id}</option>)}</select><small>仅用于新会话，已有会话保留当前模型。</small></label>
+                      {editorProfile?.defaultModel && <label className="setting-field"><span>默认思考级别</span><select value={editorProfile.defaultModel.thinkingLevel} onChange={(event) => updateAgentProfile({ defaultModel: { ...editorProfile.defaultModel!, thinkingLevel: event.currentTarget.value as AppSettings["thinkingLevel"] } })}>{["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => <option key={level} value={level}>{level}</option>)}</select></label>}
+                    </div>
+                  </section>
+                  <section className="profile-form-group profile-capabilities">
+                    <h3>配置能力</h3>
+                    <div className="capability-grid">
+                      <button type="button" onClick={() => setCustomizationSection("prompt")}><span className="capability-number">01</span><div><strong>系统提示词</strong><p>{runtimeDraft.enabled && runtimeDraft.systemPrompt ? "已配置，点击编辑提示词" : "设置角色、表达方式与行为约束"}</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                      <button type="button" onClick={() => setCustomizationSection("agent")}><span className="capability-number">02</span><div><strong>工具与权限</strong><p>{runtimeDraft.toolMode === "default" ? "默认工具组合" : `${runtimeDraft.enabledTools.length + runtimeDraft.customTools.filter((tool) => tool.enabled).length} 个工具已选`} · 配置工具及访问范围</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                      <button type="button" onClick={() => setCustomizationSection("skills")}><span className="capability-number">03</span><div><strong>Skills</strong><p>{runtimeDraft.skillsEnabled ? "已启用 Tao Skills" : "加载可复用的能力说明"}</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                    </div>
+                  </section>
                 </div>
               )}
               {customizationSection === "prompt" && (
@@ -4245,10 +4394,6 @@ function App() {
                     <span>会话附加提示词</span>
                     <textarea rows={6} value={runtimeDraft.conversationPrompt} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, conversationPrompt: event.currentTarget.value })} placeholder="应用到 Tao 每个会话的附加约束。" />
                   </label>
-                  <div className="workspace-actions">
-                    <span>保存位置：%USERPROFILE%\.tao\runtime\profile.json</span>
-                    <button className="primary-button" disabled={anyConversationGenerating || anyConversationPreparing} type="button" onClick={() => void saveRuntimeConfiguration()}>保存配置</button>
-                  </div>
                 </div>
               )}
               {customizationSection === "agent" && (
@@ -4256,7 +4401,7 @@ function App() {
                   <div className="workspace-heading">
                     <span className="eyebrow">工具</span>
                     <h2>工具</h2>
-                    <p>复用内置工具能力，再通过 Tao 配置自己的工具。保存后，新建或重新连接的会话会使用这里的配置。</p>
+                    <p>为当前组合选择工具。工具库可被多个组合引用，保存后已有会话继续使用原版本。</p>
                   </div>
                   <label className="setting-field">
                     <span>工具模式</span>
@@ -4370,37 +4515,36 @@ function App() {
                   <div className="customization-block custom-tools-block">
                     <div className="customization-block-heading">
                       <div>
-                        <strong>自定义工具</strong>
-                        <span>先填写工具定义，再在上面的自定义工具集中决定是否启用。</span>
+                        <strong>共享工具库</strong>
+                        <span>工具定义在所有组合之间共享，勾选状态仅属于当前组合。</span>
                       </div>
                       <button className="secondary-button compact-button" type="button" onClick={addCustomTool}>
                         新增工具
                       </button>
                     </div>
-                    <div className="custom-tool-guide">
-                      <strong>填写示例</strong>
+                    <details className="custom-tool-guide">
+                      <summary>工具定义与输入示例</summary>
                       <span>
                         例如创建 <code>search_docs</code>：显示名称写“搜索文档”，描述写清楚模型什么时候使用；
                         命令工具可使用 <code>{"{{query}}"}</code>，完整 JSON 参数会放在 <code>TAO_TOOL_INPUT_JSON</code>。
                       </span>
                       <span>
-                        输入 Schema 示例：<code>{'{"query":"关键词"}'}</code>。HTTP 工具则填写 URL 模板、请求头和请求体模板。
+                        输入示例：<code>{'{"query":"关键词"}'}</code>。输入 Schema 填写 object 类型的 JSON Schema；HTTP 工具填写 URL、请求头和请求体模板。
                       </span>
-                    </div>
+                    </details>
                     {(runtimeDraft.customTools ?? []).length === 0 ? (
                       <div className="custom-tools-empty">
                         <span>还没有自定义工具</span>
-                        <small>新增后会自动带有一个可运行的命令示例，权限默认是“询问确认”。</small>
+                        <small>新增后带有一个可运行的程序示例，权限默认是“询问确认”。</small>
                       </div>
                     ) : (
                       <div className="custom-tools-list">
                         {(runtimeDraft.customTools ?? []).map((tool) => (
-                          <section className="custom-tool-card" key={tool.id}>
+                          <section className={`custom-tool-card ${expandedCustomToolId === tool.id ? "expanded" : ""}`} key={tool.id}>
                             <div className="custom-tool-card-header">
-                              <div>
-                                <strong>{tool.label || tool.name || "未命名工具"}</strong>
-                                <small>{tool.name || "未设置名称"}</small>
-                              </div>
+                              <button className="custom-tool-expand" type="button" aria-expanded={expandedCustomToolId === tool.id} aria-controls={`tool-details-${tool.id}`} onClick={() => setExpandedCustomToolId((current) => current === tool.id ? null : tool.id)}>
+                                <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" /></svg><span><strong>{tool.label || tool.name || "未命名工具"}</strong><small>{tool.name || "未设置名称"} · {tool.kind === "process" ? "程序" : tool.kind === "http" ? "HTTP" : "Shell"}</small></span>
+                              </button>
                               <div className="custom-tool-card-actions">
                                 <label className="compact-switch">
                                   <input
@@ -4415,6 +4559,7 @@ function App() {
                                 </button>
                               </div>
                             </div>
+                            {expandedCustomToolId === tool.id && <div className="custom-tool-details" id={`tool-details-${tool.id}`}>
                             <div className="two-column-settings custom-tool-fields">
                               <label className="setting-field">
                                 <span>工具名称</span>
@@ -4423,7 +4568,6 @@ function App() {
                                   placeholder="例如 search_docs"
                                   onChange={(event) => updateCustomTool(tool.id, {
                                     name: event.currentTarget.value,
-                                    id: tool.id === tool.name ? event.currentTarget.value : tool.id,
                                   })}
                                 />
                                 <small>只能使用字母、数字、下划线和连字符。</small>
@@ -4452,13 +4596,14 @@ function App() {
                                   value={tool.kind}
                                   onChange={(event) => updateCustomTool(tool.id, { kind: event.currentTarget.value as CustomToolConfiguration["kind"] })}
                                 >
-                                  <option value="command">命令</option>
+                                  <option value="process">程序与参数</option>
+                                  <option value="command">Shell 命令</option>
                                   <option value="http">HTTP 请求</option>
                                 </select>
-                                <small>命令在当前工作区执行；HTTP 按模板请求远程地址。</small>
+                                <small>推荐程序与参数；命令在会话工作区执行。</small>
                               </label>
                               <label className="setting-field">
-                                <span>权限模式</span>
+                                <span>工具库权限</span>
                                 <select
                                   value={tool.permissionMode ?? "ask"}
                                   onChange={(event) => updateCustomTool(tool.id, {
@@ -4469,10 +4614,13 @@ function App() {
                                   <option value="allow">自动允许</option>
                                   <option value="deny">禁止执行</option>
                                 </select>
-                                <small>模型调用此工具时生效；新工具默认询问确认。</small>
+                                <small>组合可以进一步收窄；禁止和询问规则不会被完全放行绕过。</small>
                               </label>
                             </div>
-                            {tool.kind === "command" ? (
+                            <label className="setting-field"><span>执行超时（秒）</span><input type="number" min={1} max={120} value={(tool.timeoutMs ?? 120000) / 1000} onChange={(event) => updateCustomTool(tool.id, { timeoutMs: Number(event.currentTarget.value) * 1000 })} /></label>
+                            {tool.kind === "process" ? (
+                              <div className="two-column-settings"><label className="setting-field"><span>可执行文件</span><input value={tool.executable ?? ""} placeholder="node 或程序绝对路径" onChange={(event) => updateCustomTool(tool.id, { executable: event.currentTarget.value })} /><small>node 使用 Tao 内置运行环境。</small></label><label className="setting-field"><span>参数 JSON 数组</span><textarea rows={4} value={tool.arguments ?? "[]"} onChange={(event) => updateCustomTool(tool.id, { arguments: event.currentTarget.value })} /><small>每个参数独立传递，不经过 Shell；支持参数占位符。</small></label></div>
+                            ) : tool.kind === "command" ? (
                               <label className="setting-field">
                                 <span>命令模板</span>
                                 <textarea
@@ -4501,12 +4649,13 @@ function App() {
                                 </label>
                                 <label className="setting-field">
                                   <span>请求头 JSON</span>
-                                  <textarea rows={3} value={tool.headers} placeholder={'{"Authorization":"Bearer ..."}'} onChange={(event) => updateCustomTool(tool.id, { headers: event.currentTarget.value })} />
+                                  <textarea rows={3} value={tool.headers} placeholder={'{"Authorization":"Bearer {{env:MY_TOOL_KEY}}"}'} onChange={(event) => updateCustomTool(tool.id, { headers: event.currentTarget.value })} /><small>支持环境变量凭据引用；导出会脱敏常见凭据字段。</small>
                                 </label>
                                 <label className="setting-field">
                                   <span>请求体模板</span>
                                   <textarea rows={3} value={tool.bodyTemplate} placeholder={'{"input":"{{input}}"}'} onChange={(event) => updateCustomTool(tool.id, { bodyTemplate: event.currentTarget.value })} />
                                 </label>
+                                <label className="setting-field"><span>允许访问的域名</span><input value={(tool.allowedHosts ?? []).join(", ")} placeholder="api.example.com, localhost" onChange={(event) => updateCustomTool(tool.id, { allowedHosts: event.currentTarget.value.split(",").map((host) => host.trim()).filter(Boolean) })} /><small>留空表示不限制主机名；HTTP 重定向不会自动跟随。</small></label>
                               </div>
                             )}
                             <label className="setting-field">
@@ -4539,18 +4688,21 @@ function App() {
                                 >
                                   {testingCustomToolId === tool.id ? "测试中…" : "测试工具"}
                                 </button>
-                                {customToolTestOutput && <pre>{customToolTestOutput}</pre>}
+                                {customToolTestOutput && lastTestToolId === tool.id && <pre>{customToolTestOutput}</pre>}
                               </div>
                             </div>
+                            </div>}
                           </section>
                         ))}
                       </div>
                     )}
                   </div>
-                  <div className="workspace-actions">
-                    <span>保存位置：%USERPROFILE%\.tao\runtime\profile.json</span>
-                    <button className="primary-button" disabled={anyConversationGenerating || anyConversationPreparing} type="button" onClick={() => void saveRuntimeConfiguration()}>保存配置</button>
-                  </div>
+                  <div className="customization-block"><div className="customization-block-heading"><div><strong>当前组合的工具权限</strong><span>禁止优先；文件范围规则适用于内置文件工具，命令执行仍需按工具审核。</span></div></div><div className="tool-permission-list">
+                    {[...BUILTIN_TOOL_OPTIONS.map(([name, label]) => ({ name, label })), ...runtimeDraft.customTools.filter((tool) => tool.enabled).map((tool) => ({ name: tool.name, label: tool.label || tool.name }))].map(({ name, label }) => {
+                      const rule = runtimeDraft.toolPermissions?.[name] ?? { mode: "inherit", pathScope: "any" };
+                      return <div className="tool-permission-row" key={name}><span>{label}<small>{name}</small></span><select aria-label={`${label}权限`} value={rule.mode} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, mode: event.currentTarget.value as ToolPermissionConfiguration["mode"] } } })}><option value="inherit">继承默认审核</option><option value="ask">询问确认</option><option value="allow">自动允许</option><option value="deny">禁止执行</option></select>{["read", "write", "edit", "grep", "find", "ls"].includes(name) && <select aria-label={`${label}文件范围`} value={rule.pathScope} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, pathScope: event.currentTarget.value as ToolPermissionConfiguration["pathScope"] } } })}><option value="any">工作区外按审核规则处理</option><option value="workspace">仅当前工作区</option></select>}</div>;
+                    })}
+                  </div></div>
                 </div>
               )}
               {customizationSection === "skills" && (
@@ -4567,11 +4719,7 @@ function App() {
                   <div className="settings-card skill-path-card">
                     <span className="skill-path-label">Skills 目录</span>
                     <code>%USERPROFILE%\.tao\skills</code>
-                    <p>这是 Tao 的统一目录，不需要额外维护产品外部的 Pi 配置目录。保存配置时会自动创建该目录。</p>
-                  </div>
-                  <div className="workspace-actions">
-                    <span>当前只接入 Skill 加载；Extension Hooks 后续单独设计。</span>
-                    <button className="primary-button" disabled={anyConversationGenerating || anyConversationPreparing} type="button" onClick={() => void saveRuntimeConfiguration()}>保存配置</button>
+                    <p>这是 Tao 的统一目录。每个组合可独立决定是否加载目录中的 Skill。</p>
                   </div>
                 </div>
               )}
@@ -4582,6 +4730,16 @@ function App() {
                   <p>页面入口已经预留，后续会在明确配置边界后接入。</p>
                 </div>
               )}
+              </div>
+              <footer className="profile-save-bar">
+                <div className={`profile-save-state ${catalogDirty ? "dirty" : ""}`} role="status"><span className="profile-save-dot" /><div><strong>{catalogSaving ? "正在保存…" : catalogDirty ? "有未保存的更改" : "所有更改已保存"}</strong><small>已有会话保留原版本</small></div></div>
+                <div className="profile-save-actions">
+                  {catalogDirty && <button className="text-button" type="button" onClick={() => selectEditorProfile(agentCatalog.profiles.some((profile) => profile.id === selectedProfileId) ? selectedProfileId : agentCatalog.defaultProfileId, agentCatalog)}>放弃更改</button>}
+                  <button className="secondary-button compact-button" type="button" title="保存并新建独立测试会话" onClick={() => void testAgentProfile()}>测试组合 <span aria-hidden="true">↗</span></button>
+                  <button className="primary-button" type="button" onClick={() => void saveRuntimeConfiguration()}>{catalogSaving ? "保存中…" : "保存组合"}</button>
+                </div>
+              </footer>
+              </fieldset>
             </div>
           </section>
         )}
@@ -5251,7 +5409,7 @@ function App() {
             {runtimeHost.exitCode !== null && <div><dt>退出码</dt><dd>{runtimeHost.exitCode}</dd></div>}
             {runtimeHost.nodePath && <div><dt>Node 路径</dt><dd>{runtimeHost.nodePath}</dd></div>}
             {runtimeHost.runtimePath && <div><dt>脚本路径</dt><dd>{runtimeHost.runtimePath}</dd></div>}
-            {runtimeHost.piPath && <div><dt>Pi 路径</dt><dd>{runtimeHost.piPath}</dd></div>}
+            {runtimeHost.piPath && <div><dt>内核路径</dt><dd>{runtimeHost.piPath}</dd></div>}
             <div><dt>托管会话</dt><dd>{runtimeHost.sessionCount}</dd></div>
             <div><dt>Provider</dt><dd>{settings.provider}</dd></div>
             <div><dt>Model</dt><dd>{settings.model}</dd></div>
@@ -5276,10 +5434,11 @@ function App() {
           </> : mainView === "customization" ? <>
             <div className="runtime-summary">
               <span className={`runtime-state-dot ${runtimeDraft.enabled ? "ready" : ""}`} />
-              <div><strong>{runtimeDraft.enabled ? "定制配置已启用" : "定制配置已关闭"}</strong><small>{customizationSection === "prompt" ? "正在编辑提示词" : "等待选择配置项"}</small></div>
+              <div><strong>{runtimeDraft.enabled ? "提示词定制已启用" : "提示词定制已关闭"}</strong><small>{customizationSection === "prompt" ? "正在编辑提示词" : "正在编辑组合配置"}</small></div>
             </div>
             <dl className="runtime-details">
-              <div><dt>配置文件</dt><dd>%USERPROFILE%\.tao\runtime\profile.json</dd></div>
+              <div><dt>当前组合</dt><dd>{editorProfile?.name ?? "未选择"} · v{editorProfile?.revision || 1}</dd></div>
+              <div><dt>配置文件</dt><dd>%USERPROFILE%\.tao\agents\catalog.json</dd></div>
               <div><dt>提示词</dt><dd>{runtimeDraft.systemPrompt.trim() ? "已配置" : "未配置"}</dd></div>
               <div><dt>加载方式</dt><dd>{runtimeDraft.systemPromptMode === "append" ? "追加默认提示词" : "替换默认提示词"}</dd></div>
               <div><dt>Context</dt><dd>规划中</dd></div>

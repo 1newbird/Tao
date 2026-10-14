@@ -114,6 +114,8 @@ pub struct RetryConfiguration {
     pub base_url: String,
     pub api: String,
     pub thinking_level: String,
+    #[serde(default)]
+    pub agent_snapshot: Option<AgentSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -136,6 +138,8 @@ pub struct Conversation {
     #[serde(default)]
     pub workspace_name: String,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub agent_snapshot: Option<AgentSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -179,11 +183,13 @@ pub struct AppState {
     pub conversations: Vec<Conversation>,
     pub settings: AppSettings,
     pub runtime_configuration: RuntimeConfiguration,
+    pub agent_catalog: AgentCatalog,
+    pub storage_warnings: Vec<String>,
     pub api_key_configured: bool,
     pub provider_auth_configured: BTreeMap<String, bool>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeConfiguration {
@@ -198,6 +204,7 @@ pub struct RuntimeConfiguration {
     pub extensions_enabled: bool,
     #[serde(default)]
     pub custom_tools: Vec<CustomToolConfiguration>,
+    pub tool_permissions: BTreeMap<String, ToolPermissionConfiguration>,
 }
 
 impl Default for RuntimeConfiguration {
@@ -212,11 +219,12 @@ impl Default for RuntimeConfiguration {
             skills_enabled: false,
             extensions_enabled: false,
             custom_tools: Vec::new(),
+            tool_permissions: BTreeMap::new(),
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomToolConfiguration {
@@ -234,6 +242,10 @@ pub struct CustomToolConfiguration {
     pub headers: String,
     pub body_template: String,
     pub input_schema: String,
+    pub executable: String,
+    pub arguments: String,
+    pub timeout_ms: u64,
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for CustomToolConfiguration {
@@ -252,8 +264,80 @@ impl Default for CustomToolConfiguration {
             headers: String::new(),
             body_template: String::new(),
             input_schema: String::new(),
+            executable: String::new(),
+            arguments: "[]".to_string(),
+            timeout_ms: 120_000,
+            allowed_hosts: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ToolPermissionConfiguration {
+    pub mode: String,
+    pub path_scope: String,
+}
+
+impl Default for ToolPermissionConfiguration {
+    fn default() -> Self {
+        Self { mode: "inherit".into(), path_scope: "any".into() }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub revision: u32,
+    pub configuration: RuntimeConfiguration,
+    #[serde(default)]
+    pub custom_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub default_model: Option<AgentModelDefaults>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSnapshot {
+    pub profile_id: String,
+    pub name: String,
+    pub revision: u32,
+    pub configuration: RuntimeConfiguration,
+    #[serde(default)]
+    pub default_model: Option<AgentModelDefaults>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelDefaults {
+    pub provider: String,
+    pub model: String,
+    pub thinking_level: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentDefault {
+    pub workspace_path: String,
+    pub profile_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCatalog {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub revision: u64,
+    pub default_profile_id: String,
+    pub profiles: Vec<AgentProfile>,
+    pub tools: Vec<CustomToolConfiguration>,
+    #[serde(default)]
+    pub workspace_defaults: Vec<WorkspaceAgentDefault>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -263,6 +347,8 @@ pub struct TestCustomToolRequest {
     pub input: String,
     #[serde(default)]
     pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub permission_rule: ToolPermissionConfiguration,
 }
 
 #[derive(Debug, Serialize)]

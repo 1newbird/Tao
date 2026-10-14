@@ -144,7 +144,7 @@ async function prepareResources() {
   await rm(resourceRoot, { recursive: true, force: true });
   await mkdir(resourceRoot, { recursive: true });
 
-  await copyTree(runtimeScript, join(resourceRoot, "runtime", "tao-runtime.mjs"));
+  await copyTree(join(projectRoot, "src-tauri", "runtime"), join(resourceRoot, "runtime"));
   await copyTree(join(piRoot, "packages"), join(resourceRoot, "pi", "packages"), {
     filter: shouldCopyPiPath,
   });

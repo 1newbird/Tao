@@ -329,6 +329,7 @@ pub fn send_message(
             conversation.id = request.conversation_id.clone();
             conversation
         });
+    crate::agents::ensure_snapshot(app, &mut conversation)?;
     let timestamp = storage::now_millis();
     conversation.messages.push(Message {
         id: storage::new_id("message"),
@@ -372,6 +373,7 @@ pub fn send_message(
                     base_url: request.base_url.trim().to_string(),
                     api: request.api.trim().to_string(),
                     thinking_level: request.thinking_level.trim().to_string(),
+                    agent_snapshot: conversation.agent_snapshot.clone(),
                 }),
                 thinking: None,
                 duration_ms: None,
@@ -429,6 +431,7 @@ pub fn retry_message(
     conversation.provider = retry.provider.clone();
     conversation.model = retry.model.clone();
     conversation.thinking_level = retry.thinking_level.clone();
+    if retry.agent_snapshot.is_some() { conversation.agent_snapshot = retry.agent_snapshot.clone(); }
     conversation.updated_at = storage::now_millis();
     storage::write_conversation(app, &conversation)?;
 
@@ -474,6 +477,7 @@ pub fn retry_message(
                     base_url: prompt_request.base_url.trim().to_string(),
                     api: prompt_request.api.trim().to_string(),
                     thinking_level: prompt_request.thinking_level.trim().to_string(),
+                    agent_snapshot: conversation.agent_snapshot.clone(),
                 }),
                 thinking: None,
                 duration_ms: None,
@@ -502,13 +506,14 @@ pub fn prepare_session(
     if request.conversation_id.trim().is_empty() || provider.is_empty() || model.is_empty() {
         return Err("会话预热参数不完整".to_string());
     }
-    let conversation = storage::load_conversation_if_exists(app, &request.conversation_id)?
+    let mut conversation = storage::load_conversation_if_exists(app, &request.conversation_id)?
         .unwrap_or_else(|| {
             let mut conversation =
                 storage::new_conversation(provider, model, &request.thinking_level);
             conversation.id = request.conversation_id.clone();
             conversation
         });
+    crate::agents::ensure_snapshot(app, &mut conversation)?;
     let rpc_request = SendMessageRequest {
         request_id: storage::new_id("prepare"),
         conversation_id: request.conversation_id,
@@ -536,6 +541,7 @@ pub fn prepare_session(
             "permissionMode": conversation.permission_mode.clone(),
             "permissionTimeoutMs": rpc_request.permission_timeout_ms,
             "workspacePath": conversation.workspace_path,
+            "runtimeConfiguration": conversation.agent_snapshot.as_ref().map(|snapshot| &snapshot.configuration),
             "attachments": rpc_request.attachments,
         }),
         Duration::from_secs(120),
@@ -565,13 +571,20 @@ fn run_pi_rpc(
             "permissionMode": conversation.permission_mode.clone(),
             "permissionTimeoutMs": request.permission_timeout_ms,
             "workspacePath": conversation.workspace_path,
+            "runtimeConfiguration": conversation.agent_snapshot.as_ref().map(|snapshot| &snapshot.configuration),
             "attachments": request.attachments,
         }),
         RPC_RESPONSE_TIMEOUT,
     )
     .map_err(|error| {
         if error.contains("等待 Tao Runtime 响应超时") {
-            "等待 Tao Runtime 最终回答超时（30 分钟）。工具操作可能已经完成，请查看文件结果后再决定是否重试。".to_string()
+            let cancelled = manager.request(app, serde_json::json!({ "type": "cancel_active", "conversationId": conversation.id }), Duration::from_secs(10));
+            if cancelled.is_err() {
+                manager.stop();
+                "请求超时且后台未确认取消，已停止 Runtime。请检查已有操作结果后重新连接。".to_string()
+            } else {
+                "请求超时（30 分钟），后台任务已取消。已有工具操作不会回滚，请检查结果后决定是否重试。".to_string()
+            }
         } else {
             error
         }
@@ -1172,7 +1185,7 @@ fn resolve_pi_root(app: &AppHandle) -> Result<PathBuf, String> {
         return Ok(resource_root);
     }
 
-    Err("找不到 Tao 内置的 Pi source（vendor/pi）".to_string())
+    Err("找不到 Tao 内核资源（vendor/pi）".to_string())
 }
 
 fn validate_base_url(value: &str) -> Result<String, String> {
@@ -1231,8 +1244,5 @@ fn write_model_config(
         );
     }
     let config = serde_json::json!({ "providers": provider_configs });
-    let content = serde_json::to_string_pretty(&config)
-        .map_err(|error| format!("无法生成 Pi 自定义模型配置：{error}"))?;
-    fs::write(agent_dir.join("models.json"), content)
-        .map_err(|error| format!("无法保存 Pi 自定义模型配置：{error}"))
+    storage::write_json(&agent_dir.join("models.json"), &config, "自定义模型配置")
 }
