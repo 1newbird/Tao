@@ -1,132 +1,113 @@
 # Tao
 
-Tao 是一个面向 Windows 10/11 x64 的桌面智能体工作台，使用 Tauri 作为桌面壳，内置 Tao Runtime 和 Tao 智能体内核。
+**可定制、可协作、可观察的桌面智能体工作台。**
 
-```text
-Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Tao 智能体内核
-```
+Tao 把角色提示词、工具和权限保存为可复用的「智能体组合」。你可以为不同会话或项目选择组合，让多个成员分工、交流和复核，并随时查看执行过程、补充要求或停止任务。
 
-## 重要说明
+我们的目标是让搭建垂类智能体更简单：把需要模型判断的环节交给智能体，把确定的业务操作封装成工具，逐步连接成适合自己的工作方式。
 
-- Tao 内核基于 Pi 的固定源码快照，保留在 `vendor/pi`，不是 Git submodule；原始来源和许可证保留。
-- 本仓库不跟踪 Pi 上游最新代码。
-- 后续如果修改 Pi 代码，直接在本仓库提交，把它视为 Tao 自己的源码。
-- 使用者不需要另外安装、下载或更新 Pi。
+[下载安装](https://github.com/1newbird/Tao/releases/latest) · [功能指南](docs/项目手册/12-功能指南.md) · [源码运行](#从源码运行) · [开发计划](docs/开发TODO.md)
 
-## 环境要求
+![Tao 协作成员查看界面](docs/assets/tao-collaboration.jpg)
 
-完整的环境安装与验证步骤见：
+*实际前端界面，使用模拟资料展示成员查看与人工介入；不代表真实模型测试结果。*
 
-- [docs/项目手册/03a-从零开始配置开发环境.md](docs/项目手册/03a-从零开始配置开发环境.md)
+## 现在可以做什么
 
-核心要求：
+| 能力 | 使用方式 |
+|---|---|
+| **定制智能体组合** | 设置角色、附加要求、工具、权限、默认模型和 Skills 开关；按会话选择，也可设为项目默认。 |
+| **接入自己的工具** | 在共享工具库定义程序、Shell 或 HTTP 工具，配置输入参数结构，再加入需要的组合；支持组合导入导出。 |
+| **组织多智能体协作** | 派发不同角色的成员并行执行、定向交流，共享任务板支持认领、依赖、结果验收、重试与取消。 |
+| **查看和介入成员任务** | 查看成员对话、执行摘要、协作消息和任务历史；可打开独立查看窗口、补充说明、追加任务或停止执行。 |
+| **看清提示词与上下文** | 预览默认提示词及组装来源；会话中查看首次记录的 SDK 输入，区分系统指令、消息概况和工具定义。 |
+| **在工作区持续对话** | 配置模型服务，使用附件、文件预览、Git Diff 和权限确认；流式生成时可上翻历史，消息支持 Markdown 与复制。 |
 
-- Windows x64
-- Node.js 22.19.0 或更高版本和 npm（脚本在缺失时安装 Node 22.19.0）
-- Rust stable，默认工具链为 `x86_64-pc-windows-msvc`
-- Visual Studio C++ Build Tools（2022 或兼容的较新版本）及 Windows SDK
-- Windows WebView2 Runtime
-- PowerShell
+### 把配置变成可复用的能力
 
-## 快速开始
+在「定制」中创建组合，保存提示词和工具选择，再从会话顶部切换。工具定义由多个组合共享，启用范围和权限按组合管理。
 
-克隆项目后，推荐在 PowerShell 中从仓库根目录执行：
+已有会话保留配置快照。修改组合后，由你在会话中点击「应用新版组合」，不会悄悄改变正在运行的任务。需要全新的上下文时，可以新建会话或点击「测试组合」。
+
+![Tao 智能体组合定制界面](docs/assets/tao-customization.jpg)
+
+*实际定制界面，使用模拟配置。标记为「规划中」的栏目尚未开放。*
+
+### 让协作过程可以检查
+
+主智能体可以把任务交给拥有独立上下文的成员。成员能分享发现、提出问题和认领后续任务；前置任务通过验收后，下游任务才会开放执行。
+
+在右侧「工作过程 → 协作成员」中选择成员，中间区域显示其详情。「独立窗口」打开同一个成员的查看页，不创建另一份任务。补充说明会在下一次模型调用前送达；关闭查看页不会停止任务。
+
+### 让上下文组成可以解释
+
+在「定制 → 系统提示词」中查看默认内容、组成与来源，以及自定义配置的合成预览。实际工作区、权限和环境信息在运行时绑定。
+
+会话右侧的「上下文」保存首次记录的 SDK 输入。完整工具说明与参数结构通过独立的 `tools` 字段提供，系统指令只保留工具短索引与指导。这里展示的是 SDK 输入记录，不是供应商最终 HTTP 请求或隐藏推理。
+
+## 下载安装
+
+当前提供 **Windows 10/11 x64** 安装包。
+
+1. 前往 [最新 Release](https://github.com/1newbird/Tao/releases/latest)，下载 `.msi` 安装包并安装。
+2. 打开 Tao，在「设置 → 模型与 Provider」填写服务地址、模型与认证，保存并测试连接。
+3. 新建对话，选择工作区与组合，输入任务开始使用。
+
+**普通用户无需安装 Node.js、Rust 或开发工具链**，安装包已包含应用运行所需的 Node 和后台资源。缺少 WebView2 时，安装程序可能需要联网获取它。当前安装包尚未签名，Windows 可能提示未知发布者。
+
+工具调用仍有各自的外部依赖：命令工具需要可用的 Bash（例如 Git Bash）；搜索工具可能需要联网获取 `rg`、`fd`；自定义工具依赖的程序或服务也需要可用。普通模型对话不要求安装 Git 或 Bash。
+
+配置和会话默认保存在 `%USERPROFILE%\.tao`。模型请求会按配置发送给所选服务商；本地保存数据不代表模型在本地运行。请勿公开认证文件或把 API Key 写进提示词。
+
+## 当前范围与后续方向
+
+Tao 仍在迭代。当前版本已经支持组合定制和一层父子协作，使用时需了解这些边界：
+
+- **协作运行在单机、单 Runtime 中。** 主请求结束或停止时回收未完成成员；重启后不会自动重放未完成任务。历史可查看，不支持跨轮常驻团队或递归派发。
+- **成员共用工作区。** 文件权限和工具确认用于约束调用；尚无操作系统沙盒和成员文件隔离。并行写入需要明确分工，停止或重试不会撤销已发生的操作。
+- **上下文支持预览与首次记录。** 自定义压缩策略、逐轮完整追踪、团队令牌与费用硬预算仍待开发。
+- **扩展能力逐步开放。** 现有入口是工具、提示词和 Skills 加载开关；可视化工作流编辑器、Extension/Hook 编辑与插件市场尚未实现。
+
+开发顺序与待解决问题见 [开发 TODO](docs/开发TODO.md)。
+
+## 从源码运行
+
+在 Windows x64 的 PowerShell 中，从仓库根目录执行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-dev.ps1
 npm.cmd run tauri dev
 ```
 
-`setup-dev.ps1` 检查并补齐开发环境，优先把新安装的便携 Node、Rust 工具链和 npm 缓存放到 `D:\TaoDev`；已有合格组件直接复用。脚本完成后运行 TypeScript、Rust 和 Pi 工作区验证。`npm.cmd run tauri dev` 会读取脚本保存的工具路径，因此不要求全局修改 PATH；也可以运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\tao.ps1 dev`。无 D 盘时使用 `%LOCALAPPDATA%\TaoDev`；可通过 `-ToolsRoot` 指定其他位置。仅检查、不安装可加 `-CheckOnly`。
+一键脚本检查并补齐 Node.js、Rust、C++ Build Tools、Windows SDK、WebView2 和项目依赖；已有合格组件直接复用。新安装的便携工具和缓存优先放到 `D:\TaoDev`，没有 D 盘时使用 `%LOCALAPPDATA%\TaoDev`。可用 `-ToolsRoot` 指定位置，或用 `-CheckOnly` 仅检查。部分系统组件可能需要管理员授权或重启。
 
-手动安装 Node、Rust 和项目依赖的分步说明见环境手册。注意 Pi 源码快照不跟踪生成的模型目录数据；一键脚本会从相同版本的 Pi npm 发布包取得固定数据，并校验其结构。
-
-脚本还支持 `tao.ps1 check` 和 `tao.ps1 release`。首次安装 C++ Build Tools 可能要求管理员授权或重启；重启后重新运行准备脚本即可。完整说明见[从零开始配置开发环境](docs/项目手册/03a-从零开始配置开发环境.md)。
-
-`npm.cmd run check` 会执行：
-
-```text
-tsc --noEmit
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-`npm.cmd run tauri dev` 会先启动 Vite 前端，再编译并启动 Rust 桌面应用。
-
-## 智能体定制
-
-在“定制”页新建或复制组合，设置系统提示词、工具选择、Skill 开关和工具权限后保存。工具定义放在共享工具库中，组合保存工具引用；可导出组合 JSON，再在另一台电脑导入。
-
-对话顶部可以选择当前会话的组合，也可以将其设为项目默认。已有会话固定使用保存的配置快照；编辑组合后，需要在该会话点击“应用新版”才会更新。切换组合会保留已有上下文，需要独立上下文时新建测试会话。
-
-自定义工具支持程序与独立参数、Shell 和 HTTP。程序参数支持 `{{字段名}}`，`{{input}}` 表示完整输入 JSON；HTTP 请求头支持 `{{env:变量名}}` 凭据引用。工具可设为询问、允许或禁止，内置文件工具可限制到工作区。这些权限规则尚未提供操作系统沙盒隔离。
-
-组合和工具库存放于 `%USERPROFILE%\.tao\agents\catalog.json`，旧 `runtime/profile.json` 在首次使用时自动迁移并保留原文件。详细操作见[智能体组合与工具使用](docs/项目手册/10-智能体组合与工具使用.md)。
-
-## 常用命令
+开发启动脚本会读取保存的工具路径。环境、依赖修复和国内网络配置详见 [从零开始配置开发环境](docs/项目手册/03a-从零开始配置开发环境.md)。
 
 | 命令 | 作用 |
 |---|---|
-| `npm.cmd run dev` | 只启动 Vite 前端 |
-| `npm.cmd run preview:ui` | 使用内存模拟数据预览实际 UI，不连接模型或读写真实用户数据 |
-| `npm.cmd run check` | TypeScript 类型检查和 Rust `cargo check` |
-| `npm.cmd run test:agents` | 组合迁移、版本隔离、权限、工具执行与取消回归；模型服务使用本地模拟 |
+| `npm.cmd run tauri dev` | 启动完整桌面开发模式 |
+| `npm.cmd run preview:ui` | 使用内存模拟资料预览实际 UI，不连接模型或读写真实用户数据 |
+| `npm.cmd run check` | TypeScript 与 Rust 检查 |
+| `npm.cmd run test:agents` | 使用隔离配置与本地模拟模型验证 Runtime、权限和协作机制 |
+| `npm.cmd run test:ui` | 界面渲染回归 |
 | `npm.cmd run build` | 构建前端 |
-| `npm.cmd run tauri dev` | 启动完整 Tauri 开发模式 |
-| `npm.cmd run tao:prepare` | 生成发布资源，不打安装包 |
-| `npm.cmd run tao:verify` | 用内置 Node 验证发布 Runtime 的 `ready` 和请求响应 |
-| `npm.cmd run tao:release` | 生成 Windows x64 MSI |
-| `npm.cmd run tao:release:nsis` | 单独尝试生成 NSIS 安装包 |
+| `npm.cmd run tao:release` | 准备并校验发布资源，生成 Windows x64 MSI |
 
-## 项目结构
-
-```text
-src/                         React + TypeScript 前端
-src-tauri/src/               Rust/Tauri 后端命令
-src-tauri/runtime/           Tao Runtime 源码
-src-tauri/resources/         发布准备资源，构建时生成，不提交
-scripts/                     发布与验证脚本
-docs/                        设计文档和项目手册
-vendor/pi/                   Pi 固定源码快照
-```
-
-## 用户数据
-
-用户的配置、认证和会话数据位于：
-
-```text
-%USERPROFILE%\.tao
-```
-
-该目录不属于项目源码，不应提交到 Git，也不应随 MSI 公开分发。
-
-## 发布
-
-当前仅正式支持 Windows x64：
-
-```powershell
-npm.cmd run tao:release
-```
-
-生成结果位于：
-
-```text
-src-tauri/target/x86_64-pc-windows-msvc/release/bundle/
-```
-
-发布命令会自动准备并校验内置 Node、Pi 和 Runtime，检查 MSI 文件表，并把安装包路径、大小与 SHA-256 写入 `.tao-release-cache/release-report.json`。完整步骤见[Windows x64 打包发布手册](docs/项目手册/04-Windows-x64-打包发布.md)。
+安装包输出于 `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/`。完整流程见 [Windows x64 打包发布手册](docs/项目手册/04-Windows-x64-打包发布.md)。用户数据不应进入源码或安装包。
 
 ## 文档
 
-- [项目现状态与功能清单](docs/项目手册/01-项目现状与功能清单.md)
-- [架构与顶层约束](docs/项目手册/02-架构与顶层约束.md)
-- [从零开始配置开发环境](docs/项目手册/03a-从零开始配置开发环境.md)
-- [Pi 代码快照与修改规范](docs/项目手册/09-Pi代码快照与修改规范.md)
-- [GitHub 上传与发布检查清单](docs/GitHub上传与发布检查清单.md)
+- [功能指南](docs/项目手册/12-功能指南.md)：会话、组合、协作、人工介入和上下文查看。
+- [组合与工具使用](docs/项目手册/10-智能体组合与工具使用.md)：工具定义、权限规则、配置版本与导入导出。
+- [开发环境](docs/项目手册/03a-从零开始配置开发环境.md) · [架构说明](docs/项目手册/02-架构与顶层约束.md) · [项目手册目录](docs/项目手册/README.md)。
+- [开发计划](docs/开发TODO.md) · [v0.1.4 更新说明](docs/发布说明/0.1.4.md) · [发布检查清单](docs/GitHub上传与发布检查清单.md)。
 
-## 许可证
+## 使用与许可
 
-Tao 自身代码的许可证尚未确定。`vendor/pi` 内的原始代码保留其自带许可证。
+Tao 自有代码当前供**非商业学习、研究与实验**，未经版权所有者另行授权，不得用于商业用途。正式许可证文本仍在确认中，当前未采用 MIT 或 Apache-2.0 等通用开源授权；源码公开不代表获得商业使用许可。
 
-## 国内网络说明
+第三方组件按各自的许可证授权，保留原版权和许可声明。上述 Tao 自有代码政策不改变第三方代码原有的使用权利。
 
-仓库默认不提交 `.cargo/config.toml`。如果你在国内网络环境下需要加速 Cargo，可以在项目根目录本地创建 `.cargo/config.toml`，配置自己的镜像源；该目录已被 `.gitignore` 忽略。
+## 技术来源与致谢
+
+Tao 使用 Tauri、React 和 TypeScript 构建桌面体验；智能体运行层起源于 [Pi](https://github.com/earendil-works/pi)，以固定源码快照纳入仓库并随 Tao 独立维护和演进。原作者版权与 [MIT 许可证](vendor/pi/LICENSE) 保留。感谢这些项目及其贡献者。
