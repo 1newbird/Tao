@@ -247,3 +247,8 @@
 }
 @media (prefers-reduced-motion: reduce) { .tao-menu { animation: none; } }
 @keyframes profile-menu-enter { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
+.delegation-profiles { border: 0; padding: 0; margin: 16px 0; display: grid; gap: 8px; }
+.delegation-profiles legend { margin-bottom: 10px; font-size: 12px; color: var(--profile-text); }
+.delegation-profiles label { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; }
+.delegation-profiles label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.delegation-hint { color: var(--profile-muted); font-size: 12px; line-height: 1.7; }

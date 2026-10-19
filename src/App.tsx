@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -7,6 +7,17 @@ import "./profile-ui.css";
 import { catalogWithEditor, editorConfiguration, emptyConfiguration, exportProfile, mergeCatalog, safeSnapshot, workspaceKey } from "./agent-profiles";
 import type { AgentCatalog, AgentProfile, AgentSnapshot, CustomToolConfiguration, CustomToolPermissionMode, RuntimeConfiguration, ToolPermissionConfiguration } from "./agent-profiles";
 import { AgentIcon, ConversationProfileMenu, ProfileActionMenu } from "./ProfileMenu";
+import { DelegationSettings } from "./DelegationSettings";
+import { CollaborationBoard } from "./CollaborationBoard";
+import { CollaborationWorkspace } from "./CollaborationWorkspace";
+import { ContextPanel, ContextPreview } from "./ContextPanel";
+import { HelpGuide } from "./HelpGuide";
+import { ACCENT_OPTIONS, accentStyle } from "./appearance";
+import { resolvePanelLayout } from "./panel-layout";
+import { MarkdownContent } from "./MarkdownContent";
+import { useFollowScroll } from "./useFollowScroll";
+import { outputAnswer, updateOutputBlocks } from "./stream-blocks";
+import type { OutputBlock } from "./stream-blocks";
 
 type MessageRole = "user" | "assistant" | "error";
 
@@ -230,7 +241,7 @@ type QueueBehavior = "steer" | "follow_up";
 type ExportFormat = "markdown" | "json" | "text";
 type MainView = "chat" | "customization" | "settings";
 type CustomizationSection = "overview" | "prompt" | "context" | "session" | "agent" | "skills" | "extensions";
-type SettingsSection = "models" | "appearance" | "language" | "data" | "runtime" | "about";
+type SettingsSection = "models" | "appearance" | "language" | "data" | "runtime" | "about" | "help";
 type AccentColor = "tao" | "developer" | "ocean" | "amber" | "graphite";
 type ThemeMode = "light" | "dark" | "system";
 
@@ -245,21 +256,6 @@ const BUILTIN_TOOL_OPTIONS = [
 ] as const;
 
 const DEFAULT_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write"];
-
-const ACCENT_OPTIONS: Array<{
-  id: AccentColor;
-  label: string;
-  color: string;
-  strong: string;
-  soft: string;
-  line: string;
-}> = [
-  { id: "tao", label: "Tao", color: "#5d7861", strong: "#45614a", soft: "#edf3ed", line: "#b9cbbb" },
-  { id: "developer", label: "开发者绿", color: "#2f8057", strong: "#216844", soft: "#eaf5ee", line: "#a9d1b9" },
-  { id: "ocean", label: "蓝青", color: "#4b7897", strong: "#345d79", soft: "#edf4f8", line: "#b6cfdf" },
-  { id: "amber", label: "琥珀", color: "#a8752d", strong: "#81571e", soft: "#fff5e5", line: "#e1c797" },
-  { id: "graphite", label: "石墨", color: "#555b63", strong: "#3d434b", soft: "#eef0f2", line: "#c2c7cc" },
-];
 
 const THEME_OPTIONS: Array<{
   id: ThemeMode;
@@ -310,8 +306,9 @@ interface StreamState {
   thinking: string;
   thinkingOpen: boolean;
   text: string;
-  turnTextStart: number;
+  outputBlocks: OutputBlock[];
   activityOpen: boolean;
+  activityUserToggled?: boolean;
   activities: ActivityItem[];
   traces: TraceItem[];
   toolActive: boolean;
@@ -343,7 +340,7 @@ interface RuntimeHostStatus {
   piPath?: string | null;
 }
 
-type RightPanelView = "runtime" | "files";
+type RightPanelView = "runtime" | "files" | "context";
 type WorkspacePreviewMode = "file" | "diff";
 type WorkspaceMarkdownViewMode = "preview" | "source";
 
@@ -519,20 +516,6 @@ function formatFileSize(size?: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function accentStyle(accentColor: AccentColor, theme: "light" | "dark"): CSSProperties {
-  const preset = ACCENT_OPTIONS.find((option) => option.id === accentColor) ?? ACCENT_OPTIONS[0];
-  return {
-    "--tao-accent": preset.color,
-    "--tao-accent-strong": theme === "dark" ? preset.color : preset.strong,
-    "--tao-accent-soft": theme === "dark"
-      ? `color-mix(in srgb, ${preset.color} 18%, #181b19)`
-      : preset.soft,
-    "--tao-accent-line": theme === "dark"
-      ? `color-mix(in srgb, ${preset.color} 62%, #353a36)`
-      : preset.line,
-  } as CSSProperties;
-}
-
 function changeStatusLabel(status: string) {
   if (status === "added" || status === "untracked") return "新增";
   if (status === "deleted") return "删除";
@@ -549,15 +532,6 @@ function changeStatusClass(status: string) {
 
 function WorkspaceClearIcon() {
   return <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8" /></svg>;
-}
-
-function safeLinkHref(value: string) {
-  try {
-    const url = new URL(value);
-    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
-  } catch {
-    return null;
-  }
 }
 
 function formatDuration(durationMs?: number) {
@@ -653,6 +627,10 @@ function ActivityPanel({
   onToggle,
   onToggleThinking,
 }: ActivityPanelProps) {
+  const [copiedKey, setCopiedKey] = useState("");
+  const copy = useCallback((text: string, key: string) => {
+    void navigator.clipboard.writeText(text).then(() => setCopiedKey(key)).catch(() => {});
+  }, []);
   const hasThinking = Boolean(thinking?.trim());
   if (!activities.length && !hasThinking && durationMs === undefined && startedAt === undefined) return null;
   const elapsedMs = durationMs ?? (
@@ -703,7 +681,7 @@ function ActivityPanel({
                 <Fragment key={activity.id}>
                   {activity.kind === "preamble" ? (
                     <li className={`activity-preamble ${activity.state}`}>
-                      <div className="activity-preamble-text">{activityText(activity)}</div>
+                      <div className="activity-preamble-text"><MarkdownContent content={activityText(activity)} messageId={activity.id} onCopy={copy} copiedKey={copiedKey} /></div>
                     </li>
                   ) : (
                     <li className={`activity-item ${activity.state} ${activity.kind}`}>
@@ -747,6 +725,7 @@ function formatTraceElapsed(trace: TraceItem) {
 }
 
 function traceKindLabel(kind: TraceKind) {
+  if (kind === "coordination") return "协作消息";
   if (kind === "request") return "请求";
   if (kind === "runtime") return "Runtime";
   if (kind === "model") return "模型";
@@ -852,6 +831,7 @@ function TracePanel({ traces, openIds, onToggleTrace }: TracePanelProps) {
   }
   return (
     <div className="trace-panel">
+      <CollaborationBoard traces={traces} />
       {traces.map((trace) => {
         const open = openIds[trace.id] ?? trace.status === "running";
         const elapsed = formatTraceElapsed(trace);
@@ -894,457 +874,7 @@ function TracePanel({ traces, openIds, onToggleTrace }: TracePanelProps) {
   );
 }
 
-function renderInlineMarkdown(text: string, keyPrefix: string) {
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\(([^)]+)\))/g;
-  const nodes: ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let index = 0;
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const token = match[0];
-    const key = `${keyPrefix}-${index++}`;
-    if (token.startsWith("`")) {
-      const code = token.slice(1, -1);
-      nodes.push(<code className="inline-code" key={key}>{code}</code>);
-    } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("~~")) {
-      nodes.push(<del key={key}>{token.slice(2, -2)}</del>);
-    } else if (token.startsWith("*") || token.startsWith("_")) {
-      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
-    } else {
-      const label = token.slice(1, token.indexOf("]("));
-      const href = safeLinkHref(match[2] ?? "");
-      nodes.push(href ? (
-        <a key={key} href={href} target="_blank" rel="noreferrer">
-          {label}
-        </a>
-      ) : label);
-    }
-    lastIndex = match.index + token.length;
-  }
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
-}
-
-interface MarkdownContentProps {
-  content: string;
-  messageId: string;
-  copiedKey?: string;
-  onCopy: (text: string, key: string) => void;
-}
-
-function MarkdownContent({ content, messageId, copiedKey, onCopy }: MarkdownContentProps) {
-  const lines = content.replace(/\r\n?/g, "\n").split("\n");
-  const blocks: ReactNode[] = [];
-  let paragraph: string[] = [];
-  let list: { ordered: boolean; items: string[] } | null = null;
-  let code: { language: string; lines: string[] } | null = null;
-  let blockIndex = 0;
-
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    blocks.push(
-      <p key={`${messageId}-p-${blockIndex++}`}>
-        {paragraph.flatMap((line, index) => [
-          ...(index ? [<br key={`${messageId}-br-${blockIndex}-${index}`} />] : []),
-          ...renderInlineMarkdown(line, `${messageId}-inline-${blockIndex}-${index}`),
-        ])}
-      </p>,
-    );
-    paragraph = [];
-  };
-  const flushList = () => {
-    if (!list) return;
-    const ListTag = list.ordered ? "ol" : "ul";
-    blocks.push(
-      <ListTag key={`${messageId}-list-${blockIndex++}`}>
-        {list.items.map((item, index) => (
-          <li key={`${messageId}-li-${index}`}>
-            {renderInlineMarkdown(item, `${messageId}-list-inline-${index}`)}
-          </li>
-        ))}
-      </ListTag>,
-    );
-    list = null;
-  };
-  const flushCode = () => {
-    if (!code) return;
-    const codeText = code.lines.join("\n");
-    const key = `${messageId}-code-${blockIndex++}`;
-    blocks.push(
-      <div className="markdown-code-block" key={key}>
-        <div className="markdown-code-header">
-          <span>{code.language || "code"}</span>
-          <button type="button" onClick={() => onCopy(codeText, key)}>
-            {copiedKey === key ? "已复制" : "复制代码"}
-          </button>
-        </div>
-        <pre><code>{codeText}</code></pre>
-      </div>,
-    );
-    code = null;
-  };
-
-  lines.forEach((line) => {
-    const fence = line.match(/^```([A-Za-z0-9_+-]*)\s*$/);
-    if (code) {
-      if (fence) flushCode();
-      else code.lines.push(line);
-      return;
-    }
-    if (fence) {
-      flushParagraph();
-      flushList();
-      code = { language: fence[1] ?? "", lines: [] };
-      return;
-    }
-    if (!line.trim()) {
-      flushParagraph();
-      flushList();
-      return;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      const HeadingTag = `h${heading[1].length}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-      blocks.push(
-        <HeadingTag key={`${messageId}-heading-${blockIndex++}`}>
-          {renderInlineMarkdown(heading[2], `${messageId}-heading-inline-${blockIndex}`)}
-        </HeadingTag>,
-      );
-      return;
-    }
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (unordered || ordered) {
-      flushParagraph();
-      const orderedList = Boolean(ordered);
-      if (!list || list.ordered !== orderedList) {
-        flushList();
-        list = { ordered: orderedList, items: [] };
-      }
-      list.items.push((ordered?.[1] ?? unordered?.[1] ?? "").trim());
-      return;
-    }
-    if (line.startsWith(">")) {
-      flushParagraph();
-      flushList();
-      blocks.push(
-        <blockquote key={`${messageId}-quote-${blockIndex++}`}>
-          {renderInlineMarkdown(line.replace(/^>\s?/, ""), `${messageId}-quote-inline-${blockIndex}`)}
-        </blockquote>,
-      );
-      return;
-    }
-    flushList();
-    paragraph.push(line);
-  });
-
-  flushParagraph();
-  flushList();
-  flushCode();
-  return <div className="markdown-content">{blocks}</div>;
-}
-
-type MarkdownTableAlignment = "left" | "center" | "right" | null;
-
-interface WorkspaceMarkdownPreviewProps {
-  content: string;
-  filePath: string;
-  copiedKey?: string;
-  onCopy: (text: string, key: string) => void;
-}
-
-function splitMarkdownTableRow(row: string) {
-  let value = row.trim();
-  if (value.startsWith("|")) value = value.slice(1);
-  if (value.endsWith("|")) value = value.slice(0, -1);
-  const cells: string[] = [];
-  let current = "";
-  let escaped = false;
-  for (const char of value) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === "|") {
-      cells.push(current.trim());
-      current = "";
-      continue;
-    }
-    current += char;
-  }
-  cells.push(current.trim());
-  return cells;
-}
-
-function markdownTableAlignment(cell: string): MarkdownTableAlignment {
-  const normalized = cell.trim();
-  if (!/^:?-{3,}:?$/.test(normalized)) return null;
-  if (normalized.startsWith(":") && normalized.endsWith(":")) return "center";
-  if (normalized.endsWith(":")) return "right";
-  if (normalized.startsWith(":")) return "left";
-  return null;
-}
-
-function isMarkdownTableDelimiter(line: string) {
-  const cells = splitMarkdownTableRow(line);
-  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
-}
-
-function isMarkdownHorizontalRule(line: string) {
-  return /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line);
-}
-
-function renderWorkspaceInlineMarkdown(text: string, keyPrefix: string) {
-  const pattern = /(!\[[^\]]*]\(([^)]+)\)|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+]\(([^)]+)\))/g;
-  const nodes: ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let index = 0;
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const token = match[0];
-    const key = `${keyPrefix}-${index++}`;
-    if (token.startsWith("![")) {
-      const alt = token.slice(2, token.indexOf("](")).trim();
-      const source = match[2] ?? "";
-      nodes.push(
-        <span className="workspace-md-image-placeholder" key={key}>
-          <span>图片</span>
-          <code>{alt ? `${alt} · ${source}` : source}</code>
-        </span>,
-      );
-    } else if (token.startsWith("`")) {
-      nodes.push(<code className="inline-code" key={key}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("~~")) {
-      nodes.push(<del key={key}>{token.slice(2, -2)}</del>);
-    } else if (token.startsWith("*") || token.startsWith("_")) {
-      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
-    } else {
-      const label = token.slice(1, token.indexOf("]("));
-      const href = safeLinkHref(match[3] ?? "");
-      nodes.push(href ? (
-        <a key={key} href={href} target="_blank" rel="noreferrer">
-          {label}
-        </a>
-      ) : (
-        <span className="workspace-md-link-text" key={key}>{label}</span>
-      ));
-    }
-    lastIndex = match.index + token.length;
-  }
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
-}
-
-function WorkspaceMarkdownPreview({ content, filePath, copiedKey, onCopy }: WorkspaceMarkdownPreviewProps) {
-  const lines = content.replace(/\r\n?/g, "\n").split("\n");
-  const blocks: ReactNode[] = [];
-  let paragraph: string[] = [];
-  let quote: string[] = [];
-  let list: { ordered: boolean; task: boolean; items: Array<{ text: string; checked?: boolean }> } | null = null;
-  let code: { language: string; lines: string[] } | null = null;
-  let blockIndex = 0;
-
-  const keyFor = (kind: string) => `workspace-md-${filePath}-${kind}-${blockIndex++}`;
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    const key = keyFor("p");
-    blocks.push(
-      <p key={key}>
-        {paragraph.flatMap((line, index) => [
-          ...(index ? [<br key={`${key}-br-${index}`} />] : []),
-          ...renderWorkspaceInlineMarkdown(line, `${key}-inline-${index}`),
-        ])}
-      </p>,
-    );
-    paragraph = [];
-  };
-  const flushQuote = () => {
-    if (!quote.length) return;
-    const key = keyFor("quote");
-    blocks.push(
-      <blockquote key={key}>
-        {quote.map((line, index) => (
-          <p key={`${key}-line-${index}`}>
-            {renderWorkspaceInlineMarkdown(line, `${key}-inline-${index}`)}
-          </p>
-        ))}
-      </blockquote>,
-    );
-    quote = [];
-  };
-  const flushList = () => {
-    if (!list) return;
-    const key = keyFor("list");
-    const ListTag = list.ordered ? "ol" : "ul";
-    blocks.push(
-      <ListTag className={list.task ? "workspace-md-task-list" : undefined} key={key}>
-        {list.items.map((item, index) => (
-          <li className={list?.task ? "workspace-md-task-item" : undefined} key={`${key}-item-${index}`}>
-            {list?.task && (
-              <input checked={Boolean(item.checked)} readOnly tabIndex={-1} type="checkbox" />
-            )}
-            <span>{renderWorkspaceInlineMarkdown(item.text, `${key}-inline-${index}`)}</span>
-          </li>
-        ))}
-      </ListTag>,
-    );
-    list = null;
-  };
-  const flushCode = () => {
-    if (!code) return;
-    const codeText = code.lines.join("\n");
-    const key = keyFor("code");
-    blocks.push(
-      <div className="markdown-code-block workspace-md-code-block" key={key}>
-        <div className="markdown-code-header">
-          <span>{code.language || "code"}</span>
-          <button type="button" onClick={() => onCopy(codeText, key)}>
-            {copiedKey === key ? "已复制" : "复制代码"}
-          </button>
-        </div>
-        <pre><code>{codeText}</code></pre>
-      </div>,
-    );
-    code = null;
-  };
-  const flushLooseBlocks = () => {
-    flushParagraph();
-    flushQuote();
-    flushList();
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const fence = line.match(/^```([A-Za-z0-9_+-]*)\s*$/);
-    if (code) {
-      if (fence) flushCode();
-      else code.lines.push(line);
-      continue;
-    }
-    if (fence) {
-      flushLooseBlocks();
-      code = { language: fence[1] ?? "", lines: [] };
-      continue;
-    }
-    if (!line.trim()) {
-      flushLooseBlocks();
-      continue;
-    }
-    const nextLine = lines[index + 1] ?? "";
-    if (line.includes("|") && nextLine.includes("|") && isMarkdownTableDelimiter(nextLine)) {
-      flushLooseBlocks();
-      const headers = splitMarkdownTableRow(line);
-      const alignments = splitMarkdownTableRow(nextLine).map(markdownTableAlignment);
-      const rows: string[][] = [];
-      index += 2;
-      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
-        const row = splitMarkdownTableRow(lines[index]);
-        rows.push(headers.map((_, cellIndex) => row[cellIndex] ?? ""));
-        index += 1;
-      }
-      index -= 1;
-      const key = keyFor("table");
-      blocks.push(
-        <div className="workspace-md-table-wrap" key={key}>
-          <table>
-            <thead>
-              <tr>
-                {headers.map((header, headerIndex) => (
-                  <th
-                    key={`${key}-head-${headerIndex}`}
-                    style={alignments[headerIndex] ? { textAlign: alignments[headerIndex] } : undefined}
-                  >
-                    {renderWorkspaceInlineMarkdown(header, `${key}-head-inline-${headerIndex}`)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={`${key}-row-${rowIndex}`}>
-                  {headers.map((_, cellIndex) => (
-                    <td
-                      key={`${key}-cell-${rowIndex}-${cellIndex}`}
-                      style={alignments[cellIndex] ? { textAlign: alignments[cellIndex] } : undefined}
-                    >
-                      {renderWorkspaceInlineMarkdown(row[cellIndex] ?? "", `${key}-cell-inline-${rowIndex}-${cellIndex}`)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-    if (isMarkdownHorizontalRule(line)) {
-      flushLooseBlocks();
-      blocks.push(<hr key={keyFor("hr")} />);
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushLooseBlocks();
-      const HeadingTag = `h${heading[1].length}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-      const key = keyFor("heading");
-      blocks.push(
-        <HeadingTag key={key}>
-          {renderWorkspaceInlineMarkdown(heading[2], `${key}-inline`)}
-        </HeadingTag>,
-      );
-      continue;
-    }
-    const taskItem = line.match(/^\s*[-*+]\s+\[([ xX])]\s+(.+)$/);
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (taskItem || unordered || ordered) {
-      flushParagraph();
-      flushQuote();
-      const nextList = {
-        ordered: Boolean(ordered),
-        task: Boolean(taskItem),
-      };
-      if (!list || list.ordered !== nextList.ordered || list.task !== nextList.task) {
-        flushList();
-        list = { ...nextList, items: [] };
-      }
-      list.items.push({
-        text: (taskItem?.[2] ?? ordered?.[1] ?? unordered?.[1] ?? "").trim(),
-        checked: taskItem ? taskItem[1].toLowerCase() === "x" : undefined,
-      });
-      continue;
-    }
-    if (line.startsWith(">")) {
-      flushParagraph();
-      flushList();
-      quote.push(line.replace(/^>\s?/, ""));
-      continue;
-    }
-    flushQuote();
-    flushList();
-    paragraph.push(line);
-  }
-
-  flushLooseBlocks();
-  flushCode();
-  return <div className="workspace-markdown-preview">{blocks}</div>;
-}
-
-type DiffLineKind = "meta" | "hunk" | "context" | "add" | "delete";
+type DiffLineKind = "meta" | "hunk" | "add" | "delete" | "context";
 
 interface ParsedDiffLine {
   kind: DiffLineKind;
@@ -1591,6 +1121,10 @@ function App() {
   const [generatingIds, setGeneratingIds] = useState<Record<string, boolean>>({});
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [mainView, setMainView] = useState<MainView>("chat");
+  const [memberReturnToken, setMemberReturnToken] = useState(0);
+  const [contextUpdates, setContextUpdates] = useState<Record<string, { revision: number; warning: string }>>({});
+  const [memberNavigationTarget, setMemberNavigationTarget] = useState<HTMLDivElement | null>(null);
+  const [helpTopic, setHelpTopic] = useState(0);
   const [customizationSection, setCustomizationSection] = useState<CustomizationSection>("overview");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("models");
   const [runtimeDraft, setRuntimeDraft] = useState<RuntimeConfiguration>(emptyConfiguration);
@@ -1631,6 +1165,7 @@ function App() {
   const [permissionSubmitting, setPermissionSubmitting] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [rightPanelView, setRightPanelView] = useState<RightPanelView>("runtime");
+  useEffect(() => { if (mainView !== "chat" && rightPanelView === "context") setRightPanelView("runtime"); }, [mainView, rightPanelView]);
   const [filesExpanded, setFilesExpanded] = useState(false);
   const [workspaceListing, setWorkspaceListing] = useState<WorkspaceListing | null>(null);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -1665,6 +1200,18 @@ function App() {
     }
   });
   const [resizing, setResizing] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const [shellWidth, setShellWidth] = useState(() => window.innerWidth);
+  const panelLayout = resolvePanelLayout({ width: shellWidth, sidebarOpen, runtimeOpen, sidebarWidth, runtimeWidth });
+  const panelLayoutRef = useRef(panelLayout);
+  panelLayoutRef.current = panelLayout;
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const observer = new ResizeObserver(([entry]) => setShellWidth(entry.contentRect.width));
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, []);
   const [runtimeHost, setRuntimeHost] = useState<RuntimeHostStatus>({
     phase: "stopped",
     running: false,
@@ -1678,15 +1225,29 @@ function App() {
   const [runtimeRecovering, setRuntimeRecovering] = useState(false);
   const initialized = useRef(false);
   const activeIdRef = useRef("");
+  const memberConversationIds = useRef(conversations);
+  memberConversationIds.current = conversations;
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen<{ conversationId: string }>("tao-open-conversation", ({ payload }) => {
+      if (!memberConversationIds.current.some((conversation) => conversation.id === payload.conversationId)) return;
+      activeIdRef.current = payload.conversationId;
+      setActiveId(payload.conversationId); setMainView("chat"); setMemberReturnToken((value) => value + 1);
+    }).then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; });
+    return () => { disposed = true; stop?.(); };
+  }, []);
   const streamsRef = useRef<Record<string, StreamState>>({});
+  const streamDeltaQueue = useRef<TaoRuntimeEvent[]>([]);
+  const streamDeltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const completedActivitiesRef = useRef<Record<string, ActivityItem[]>>({});
   const completedTracesRef = useRef<Record<string, TraceItem[]>>({});
   const preparingRef = useRef(new Set<string>());
   const generatingRef = useRef(new Set<string>());
-  const messagesEnd = useRef<HTMLDivElement>(null);
-  const scrollFrame = useRef<number | null>(null);
+  const chatScroll = useFollowScroll(activeId, mainView === "chat" && !loading);
+  const workScroll = useFollowScroll(`${activeId}:${mainView}`, runtimeOpen && rightPanelView === "runtime");
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const resizeRef = useRef<{ side: "sidebar" | "runtime" | "directory"; startX: number; startWidth: number } | null>(null);
+  const resizeRef = useRef<{ side: "sidebar" | "runtime" | "directory"; startX: number; startWidth: number; pointerId: number; target: HTMLDivElement } | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return undefined;
@@ -1700,26 +1261,46 @@ function App() {
     streamsRef.current = streams;
   }, [streams]);
 
-  function appendStreamDelta(payload: TaoRuntimeEvent) {
-    const conversationId = payload.conversationId;
-    const requestId = payload.requestId;
-    const delta = payload.text ?? "";
-    if (!delta) return;
-
+  const flushStreamDeltas = useCallback(() => {
+    if (streamDeltaTimer.current) clearTimeout(streamDeltaTimer.current);
+    streamDeltaTimer.current = null;
+    const events = streamDeltaQueue.current;
+    streamDeltaQueue.current = [];
+    if (!events.length) return;
     setStreams((current) => {
-      const stream = current[conversationId];
-      if (!stream || stream.requestId !== requestId) return current;
-      const next = { ...stream };
-      if (payload.event === "thinking_delta") {
-        next.thinking += delta;
-        next.status = "正在思考";
-      } else if (payload.event === "text_delta") {
-        next.text += delta;
-        next.status = "正在生成回答";
+      const result = { ...current };
+      for (const payload of events) {
+        const stream = result[payload.conversationId];
+        if (!stream || stream.requestId !== payload.requestId) continue;
+        const next = { ...stream };
+        if (payload.event === "thinking_delta") {
+          next.thinking += payload.text ?? "";
+          next.status = "正在思考";
+        } else if (payload.event === "text_delta") {
+          next.text += payload.text ?? "";
+          next.status = "正在生成回答";
+        } else {
+          next.outputBlocks = updateOutputBlocks(stream.outputBlocks, payload);
+          next.text = outputAnswer(next.outputBlocks);
+          const block = next.outputBlocks.find((item) => item.id === payload.activityId);
+          if (block?.phase === "commentary") {
+            const activity: ActivityItem = { id: block.id, kind: "preamble", text: block.text, state: payload.activityState ?? "active" };
+            next.activities = stream.activities.some((item) => item.id === block.id) ? stream.activities.map((item) => item.id === block.id ? activity : item) : [...stream.activities, activity];
+            next.status = "正在说明工作进展";
+          } else next.status = "正在生成回答";
+        }
+        result[payload.conversationId] = next;
       }
-      return { ...current, [conversationId]: next };
+      return result;
     });
+  }, []);
+
+  function appendStreamDelta(payload: TaoRuntimeEvent) {
+    streamDeltaQueue.current.push(payload);
+    if (!streamDeltaTimer.current) streamDeltaTimer.current = setTimeout(flushStreamDeltas, 50);
   }
+
+  useEffect(() => () => { if (streamDeltaTimer.current) clearTimeout(streamDeltaTimer.current); streamDeltaQueue.current = []; }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1732,22 +1313,34 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [filesDirectoryWidth, runtimeWidth, sidebarWidth]);
 
+  const finishResize = useCallback(() => {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    resizeRef.current = null;
+    setResizing(false);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    try { if (resize.target.hasPointerCapture(resize.pointerId)) resize.target.releasePointerCapture(resize.pointerId); } catch { /* The view may have lost capture already. */ }
+  }, []);
+
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       const resize = resizeRef.current;
-      if (!resize) return;
+      if (!resize || resize.pointerId !== event.pointerId) return;
+      if (event.buttons === 0) { finishResize(); return; }
+      const layout = panelLayoutRef.current;
       if (resize.side === "sidebar") {
         setSidebarWidth(clampLayoutWidth(
           resize.startWidth + event.clientX - resize.startX,
-          SIDEBAR_MIN_WIDTH,
-          SIDEBAR_MAX_WIDTH,
+          layout.sidebarMin,
+          layout.sidebarMax,
           resize.startWidth,
         ));
       } else if (resize.side === "runtime") {
         setRuntimeWidth(clampLayoutWidth(
           resize.startWidth + resize.startX - event.clientX,
-          RUNTIME_MIN_WIDTH,
-          RUNTIME_MAX_WIDTH,
+          layout.runtimeMin,
+          layout.runtimeMax,
           resize.startWidth,
         ));
       } else {
@@ -1759,31 +1352,36 @@ function App() {
         ));
       }
     };
-    const handlePointerUp = () => {
-      if (!resizeRef.current) return;
-      resizeRef.current = null;
-      setResizing(false);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
+    const handlePointerUp = (event: Event) => {
+      if ("pointerId" in event && event.pointerId !== resizeRef.current?.pointerId) return;
+      finishResize();
     };
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
     window.addEventListener("pointercancel", handlePointerUp);
+    window.addEventListener("lostpointercapture", handlePointerUp);
+    window.addEventListener("blur", handlePointerUp);
     return () => {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
       window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("lostpointercapture", handlePointerUp);
+      window.removeEventListener("blur", handlePointerUp);
+      finishResize();
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
-  }, []);
+  }, [finishResize]);
 
   function beginResize(side: "sidebar" | "runtime" | "directory", event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !event.isPrimary) return;
     event.preventDefault();
     resizeRef.current = {
       side,
       startX: event.clientX,
-      startWidth: side === "sidebar" ? sidebarWidth : side === "runtime" ? runtimeWidth : filesDirectoryWidth,
+      startWidth: side === "sidebar" ? panelLayout.sidebarWidth : side === "runtime" ? panelLayout.runtimeWidth : filesDirectoryWidth,
+      pointerId: event.pointerId,
+      target: event.currentTarget,
     };
     setResizing(true);
     try {
@@ -1795,7 +1393,7 @@ function App() {
     document.body.style.userSelect = "none";
   }
 
-  async function copyText(text: string, key: string) {
+  const copyText = useCallback(async (text: string, key: string) => {
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
@@ -1816,7 +1414,7 @@ function App() {
     } catch {
       setNotice({ conversationId: activeIdRef.current || null, text: "复制失败，请手动选择文本复制。" });
     }
-  }
+  }, []);
 
   function sanitizeFileName(value: string) {
     return value.replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim().slice(0, 100) || "未命名会话";
@@ -2022,9 +1620,14 @@ function App() {
       }
       const isStreamDelta =
         payload.category === "message"
-        && (payload.event === "thinking_delta" || payload.event === "text_delta");
+        && ["thinking_delta", "text_delta", "text_block_delta", "text_block_end"].includes(payload.event);
       if (isStreamDelta) {
         appendStreamDelta(payload);
+        return;
+      }
+      flushStreamDeltas();
+      if (payload.category === "context" && ["snapshot_saved", "snapshot_warning"].includes(payload.event)) {
+        setContextUpdates((current) => ({ ...current, [payload.conversationId]: { revision: (current[payload.conversationId]?.revision ?? 0) + 1, warning: payload.event === "snapshot_warning" ? payload.text ?? "上下文快照保存失败" : "" } }));
         return;
       }
       if (payload.category === "trace") {
@@ -2064,15 +1667,6 @@ function App() {
               };
             } else {
               next.activities.push(activity);
-            }
-            const searchStart = next.turnTextStart;
-            const preambleStart = next.text.indexOf(preamble, searchStart);
-            if (preambleStart >= searchStart) {
-              const before = next.text.slice(0, preambleStart);
-              const after = next.text.slice(preambleStart + preamble.length);
-              next.text = after.trim()
-                ? `${before}${after}`
-                : before.replace(/\n\n$/, "");
             }
           }
           return { ...current, [payload.conversationId]: next };
@@ -2166,8 +1760,6 @@ function App() {
           next.status = payload.text ?? "回答已生成，正在保存会话";
           addNote(next.status);
         } else if (payload.category === "turn" && payload.event === "started") {
-          if (next.text.trim()) next.text += "\n\n";
-          next.turnTextStart = next.text.length;
           next.status = payload.text ?? "正在等待模型响应";
           addNote(next.status);
         } else if (payload.category === "turn" && payload.event === "ended") {
@@ -2223,7 +1815,7 @@ function App() {
         } else if (payload.category === "turn" && payload.event === "aborted") {
           next.completed = true;
           next.stopping = false;
-          next.activityOpen = false;
+          next.activityOpen = next.activityUserToggled ? next.activityOpen : false;
           next.thinkingOpen = false;
           next.status = "已停止";
           next.activities = next.activities.map((item) =>
@@ -2233,7 +1825,7 @@ function App() {
           completedTracesRef.current[payload.conversationId] = next.traces.map((item) => ({ ...item }));
         } else if (payload.category === "turn" && payload.event === "completed") {
           next.completed = true;
-          next.activityOpen = false;
+          next.activityOpen = next.activityUserToggled ? next.activityOpen : false;
           next.thinkingOpen = false;
           next.status = "回答完成";
           next.activities = next.activities.map((item) =>
@@ -2243,7 +1835,7 @@ function App() {
           completedTracesRef.current[payload.conversationId] = next.traces.map((item) => ({ ...item }));
         } else if (payload.category === "error" && payload.event === "runtime") {
           next.completed = true;
-          next.activityOpen = false;
+          next.activityOpen = next.activityUserToggled ? next.activityOpen : false;
           next.thinkingOpen = false;
           next.status = payload.text ?? "生成失败";
           next.activities = next.activities.map((item) =>
@@ -2397,20 +1989,6 @@ function App() {
     : mainView === "customization"
       ? "管理智能体组合、提示词和工具"
       : "管理 Tao 的全局配置";
-
-  useEffect(() => {
-    if (scrollFrame.current !== null) return;
-    scrollFrame.current = window.requestAnimationFrame(() => {
-      scrollFrame.current = null;
-      messagesEnd.current?.scrollIntoView({ behavior: "auto", block: "end" });
-    });
-    return () => {
-      if (scrollFrame.current !== null) {
-        window.cancelAnimationFrame(scrollFrame.current);
-        scrollFrame.current = null;
-      }
-    };
-  }, [activeConversation?.messages.length, activeStream?.text, activeStream?.thinking, anyConversationGenerating]);
 
   useEffect(() => {
     const listener = (event: globalThis.KeyboardEvent) => {
@@ -2982,6 +2560,8 @@ function App() {
     if (editedCatalog.profiles.length === 1 || selectedProfileId === editedCatalog.defaultProfileId) {
       setNotice({ conversationId: null, text: "需保留默认组合，请先将其他组合设为默认。" }); return;
     }
+    const references = editedCatalog.profiles.filter((profile) => profile.id !== selectedProfileId && profile.configuration.delegation?.allowedProfileIds.includes(selectedProfileId));
+    if (references.length) { setNotice({ conversationId: null, text: `请先从以下组合的子代理列表移除此组合：${references.map((profile) => profile.name).join("、")}` }); return; }
     const catalog = { ...editedCatalog, profiles: editedCatalog.profiles.filter((profile) => profile.id !== selectedProfileId), workspaceDefaults: editedCatalog.workspaceDefaults.filter((item) => item.profileId !== selectedProfileId) };
     selectEditorProfile(catalog.defaultProfileId, catalog);
     setNotice({ conversationId: null, text: "组合已从草稿移除，保存后生效。已有会话保留原配置。" });
@@ -3308,6 +2888,7 @@ function App() {
     setInput("");
     setMessageAttachments([]);
     setNotice({ conversationId, text: "" });
+    if (activeIdRef.current === conversationId) { chatScroll.scrollToLatest(); workScroll.scrollToLatest(); }
     generatingRef.current.add(conversationId);
     delete completedActivitiesRef.current[conversationId];
     delete completedTracesRef.current[conversationId];
@@ -3321,7 +2902,7 @@ function App() {
         thinking: "",
         thinkingOpen: true,
         text: "",
-        turnTextStart: 0,
+        outputBlocks: [],
         activityOpen: true,
         activities: [],
         traces: [],
@@ -3420,7 +3001,7 @@ function App() {
         }
         setMessageActivityOpen((current) => ({
           ...current,
-          [completedAssistant.id]: false,
+          [completedAssistant.id]: Boolean(streamsRef.current[conversationId]?.activityUserToggled && streamsRef.current[conversationId]?.activityOpen),
         }));
         setMessageThinkingOpen((current) => ({
           ...current,
@@ -3568,7 +3149,7 @@ function App() {
       if (!stream) return current;
       return {
         ...current,
-        [conversationId]: { ...stream, activityOpen: !stream.activityOpen },
+        [conversationId]: { ...stream, activityOpen: !stream.activityOpen, activityUserToggled: true },
       };
     });
   }
@@ -3619,21 +3200,22 @@ function App() {
 
   return (
     <div
-      className={`app-shell theme-${effectiveTheme} ${sidebarOpen ? "" : "sidebar-collapsed"} ${runtimeOpen ? "runtime-open" : ""} ${filesExpanded ? "files-expanded" : ""} ${resizing ? "resizing" : ""}`}
+      ref={shellRef}
+      className={`app-shell theme-${effectiveTheme} ${panelLayout.sidebarOpen ? "" : "sidebar-collapsed"} ${runtimeOpen ? "runtime-open" : ""} ${filesExpanded ? "files-expanded" : ""} ${resizing ? "resizing" : ""}`}
       style={{
         ...accentStyle(settings.accentColor, effectiveTheme),
-        "--tao-sidebar-width": `${sidebarWidth}px`,
-        "--tao-runtime-width": `${runtimeWidth}px`,
+        "--tao-sidebar-width": `${panelLayout.sidebarWidth}px`,
+        "--tao-runtime-width": `${panelLayout.runtimeWidth}px`,
         "--tao-files-directory-width": `${filesDirectoryWidth}px`,
       } as CSSProperties}
     >
       <button
         className="shell-panel-toggle shell-panel-toggle-left"
         type="button"
-        aria-label={sidebarOpen ? "收起对话栏" : "展开对话栏"}
-        title={sidebarOpen ? "收起对话栏" : "展开对话栏"}
-        aria-pressed={sidebarOpen}
-        onClick={() => setSidebarOpen((current) => !current)}
+        aria-label={panelLayout.sidebarOpen ? "收起对话栏" : "展开对话栏"}
+        title={panelLayout.sidebarOpen ? "收起对话栏" : "展开对话栏"}
+        aria-pressed={panelLayout.sidebarOpen}
+        onClick={() => { if (panelLayout.sidebarOpen) setSidebarOpen(false); else { setSidebarOpen(true); if (!resolvePanelLayout({ width: shellWidth, sidebarOpen: true, runtimeOpen, sidebarWidth, runtimeWidth }).sidebarOpen) setRuntimeOpen(false); } }}
       >
         <svg aria-hidden="true" viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12" rx="2" /><path d="M7 4v12" /></svg>
       </button>
@@ -3803,8 +3385,8 @@ function App() {
         aria-label="调整左侧栏宽度"
         aria-orientation="vertical"
         aria-valuemin={SIDEBAR_MIN_WIDTH}
-        aria-valuemax={SIDEBAR_MAX_WIDTH}
-        aria-valuenow={sidebarWidth}
+        aria-valuemax={panelLayout.sidebarMax}
+        aria-valuenow={panelLayout.sidebarWidth}
         tabIndex={sidebarOpen ? 0 : -1}
         onPointerDown={(event) => beginResize("sidebar", event)}
       />
@@ -3848,7 +3430,7 @@ function App() {
                     )}
                   </div>
                 )}
-                <p>{pageSubtitle}</p>
+                <p title={pageSubtitle}>{pageSubtitle}</p>
               </div>
             </div>
             <div className="header-actions">
@@ -3911,7 +3493,9 @@ function App() {
         </header>
 
         {mainView === "chat" && <>
-        <section className="message-viewport" aria-live="polite">
+        <CollaborationWorkspace key={activeId} conversationId={activeId} returnToMainToken={memberReturnToken} navigationTarget={memberNavigationTarget} />
+        <section className="message-viewport" aria-label="对话消息" tabIndex={0} aria-live="polite" ref={chatScroll.viewportRef} onScroll={chatScroll.onScroll} onWheelCapture={chatScroll.onWheelCapture} onPointerDownCapture={chatScroll.onPointerDownCapture} onKeyDownCapture={chatScroll.onKeyDownCapture}>
+          <div className="message-scroll-content">
           {loading ? (
             <div className="empty-state"><p>正在载入 Tao…</p></div>
           ) : activeConversation?.messages.length ? (
@@ -3961,10 +3545,11 @@ function App() {
                         重试
                       </button>
                     )}
-                    {message.role === "assistant" && (
+                    {(message.role === "assistant" || message.role === "user") && (
                       <button
                         className="message-copy-button"
                         type="button"
+                        aria-label={message.role === "user" ? "复制问题" : "复制回答"}
                         onClick={() => void copyText(message.content, `message-${message.id}`)}
                       >
                         {copiedKey === `message-${message.id}` ? "已复制" : "复制"}
@@ -3994,16 +3579,12 @@ function App() {
                     ) : null}
                     {activeStream.text && (
                       <div className="message-content streaming-answer">
-                        {activeStream.completed ? (
-                          <MarkdownContent
-                            content={activeStream.text}
-                            messageId={`stream-${activeStream.requestId}`}
-                            copiedKey={copiedKey}
-                            onCopy={copyText}
-                          />
-                        ) : (
-                          <div className="streaming-plain-text">{activeStream.text}</div>
-                        )}
+                        <MarkdownContent
+                          content={activeStream.text}
+                          messageId={`stream-${activeStream.requestId}`}
+                          copiedKey={copiedKey}
+                          onCopy={copyText}
+                        />
                         {!activeStream.completed && <span className="stream-cursor" aria-hidden="true" />}
                       </div>
                     )}
@@ -4039,7 +3620,7 @@ function App() {
                   </div>
                 </article>
               )}
-              <div ref={messagesEnd} />
+
             </div>
           ) : (
             <div className="empty-state">
@@ -4048,9 +3629,11 @@ function App() {
               <p>选择模型后，发送一条消息验证 Tao 的连接。</p>
             </div>
           )}
+          </div>
         </section>
 
         <div className="composer-area">
+          {!chatScroll.following && <button type="button" className="scroll-to-latest" onClick={chatScroll.scrollToLatest}>↓ 回到最新</button>}
           {notice.text && (notice.conversationId === null || notice.conversationId === activeId) && (
             <div className="notice">{notice.text}</div>
           )}
@@ -4306,7 +3889,7 @@ function App() {
                   ["prompt", "系统提示词"],
                   ["agent", "工具与权限"],
                   ["skills", "Skills"],
-                  ["context", "上下文"],
+                  ["context", "上下文策略"],
                   ["session", "会话策略"],
                   ["extensions", "Extension"],
                 ] as Array<[CustomizationSection, string]>).map(([section, label]) => (
@@ -4338,7 +3921,7 @@ function App() {
               {profileImportOpen && <section className="profile-import-panel"><div className="profile-import-heading"><strong>导入智能体组合</strong><button type="button" className="text-button" onClick={() => setProfileImportOpen(false)}>取消</button></div><label className="setting-field"><span>组合 JSON</span><textarea rows={8} value={profileImportText} onChange={(event) => setProfileImportText(event.currentTarget.value)} placeholder="粘贴导出的 Tao 组合 JSON" /><small>导入后可继续编辑，保存前请检查工具权限和凭据引用。</small></label><button className="secondary-button compact-button" type="button" onClick={() => void importAgentProfiles()}>校验并导入</button></section>}
               {customizationSection === "overview" && (
                 <div className="workspace-section profile-settings">
-                  <div className="workspace-heading"><h2>组合设置</h2><p>定义组合的基本信息，以及新会话使用的默认配置。</p></div>
+                  <div className="workspace-heading"><h2>组合设置</h2><p>定义组合的基本信息，以及新会话使用的默认配置。</p><button type="button" className="guide-link" onClick={() => { setHelpTopic(1); setSettingsSection("help"); setMainView("settings"); }}>了解组合与协作功能 →</button></div>
                   <section className="profile-form-group">
                     <h3>基本信息</h3>
                     <label className="setting-field"><span>组合名称</span><input maxLength={100} value={editorProfile?.name ?? ""} autoFocus={editorProfile?.revision === 0} placeholder="给组合起一个容易识别的名字" onChange={(event) => updateAgentProfile({ name: event.currentTarget.value })} /></label>
@@ -4357,6 +3940,7 @@ function App() {
                       {editorProfile?.defaultModel && <label className="setting-field"><span>默认思考级别</span><select value={editorProfile.defaultModel.thinkingLevel} onChange={(event) => updateAgentProfile({ defaultModel: { ...editorProfile.defaultModel!, thinkingLevel: event.currentTarget.value as AppSettings["thinkingLevel"] } })}>{["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => <option key={level} value={level}>{level}</option>)}</select></label>}
                     </div>
                   </section>
+                  <DelegationSettings value={runtimeDraft.delegation} catalog={editedCatalog} onChange={(delegation) => setRuntimeDraft({ ...runtimeDraft, delegation })} onHelp={() => { setHelpTopic(3); setSettingsSection("help"); setMainView("settings"); }} />
                   <section className="profile-form-group profile-capabilities">
                     <h3>配置能力</h3>
                     <div className="capability-grid">
@@ -4382,9 +3966,9 @@ function App() {
                     <span>系统提示词模式</span>
                     <select value={runtimeDraft.systemPromptMode} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, systemPromptMode: event.currentTarget.value as RuntimeConfiguration["systemPromptMode"] })}>
                       <option value="append">追加到默认提示词</option>
-                      <option value="replace">替换默认提示词</option>
+                      <option value="replace">替换身份与角色</option>
                     </select>
-                    <small>追加模式保留默认 Agent 行为；替换模式适合完全自定义。</small>
+                    <small>替换身份与角色，保留实际工具指导、平台执行规则、工作说明、附加要求和环境权限。空白内容使用默认角色。</small>
                   </label>
                   <label className="setting-field">
                     <span>系统提示词</span>
@@ -4394,6 +3978,7 @@ function App() {
                     <span>会话附加提示词</span>
                     <textarea rows={6} value={runtimeDraft.conversationPrompt} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, conversationPrompt: event.currentTarget.value })} placeholder="应用到 Tao 每个会话的附加约束。" />
                   </label>
+                  <ContextPreview configuration={runtimeDraft} />
                 </div>
               )}
               {customizationSection === "agent" && (
@@ -4414,7 +3999,7 @@ function App() {
                       <option value="default">默认 Coding Agent</option>
                       <option value="custom">自定义工具组合</option>
                     </select>
-                    <small>默认模式由内置工具策略决定；自定义模式只启用下面勾选的内置工具和自定义工具。</small>
+                    <small>自定义模式控制下面的内置工具和自定义工具。Tao 只读手册自动提供；协作工具在允许委派时自动加载，无需逐项勾选。</small>
                   </label>
 
                   <div className={`customization-block tool-selection-block ${runtimeDraft.toolMode === "default" ? "readonly" : ""}`}>
@@ -4697,7 +4282,7 @@ function App() {
                       </div>
                     )}
                   </div>
-                  <div className="customization-block"><div className="customization-block-heading"><div><strong>当前组合的工具权限</strong><span>禁止优先；文件范围规则适用于内置文件工具，命令执行仍需按工具审核。</span></div></div><div className="tool-permission-list">
+                  <div className="customization-block"><div className="customization-block-heading"><div><strong>当前组合的工具权限</strong><span>禁止优先；文件范围规则适用于内置文件工具，命令执行仍需按工具审核。</span></div><button type="button" className="guide-link" onClick={() => { setHelpTopic(2); setSettingsSection("help"); setMainView("settings"); }}>了解权限边界 →</button></div><div className="tool-permission-list">
                     {[...BUILTIN_TOOL_OPTIONS.map(([name, label]) => ({ name, label })), ...runtimeDraft.customTools.filter((tool) => tool.enabled).map((tool) => ({ name: tool.name, label: tool.label || tool.name }))].map(({ name, label }) => {
                       const rule = runtimeDraft.toolPermissions?.[name] ?? { mode: "inherit", pathScope: "any" };
                       return <div className="tool-permission-row" key={name}><span>{label}<small>{name}</small></span><select aria-label={`${label}权限`} value={rule.mode} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, mode: event.currentTarget.value as ToolPermissionConfiguration["mode"] } } })}><option value="inherit">继承默认审核</option><option value="ask">询问确认</option><option value="allow">自动允许</option><option value="deny">禁止执行</option></select>{["read", "write", "edit", "grep", "find", "ls"].includes(name) && <select aria-label={`${label}文件范围`} value={rule.pathScope} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, pathScope: event.currentTarget.value as ToolPermissionConfiguration["pathScope"] } } })}><option value="any">工作区外按审核规则处理</option><option value="workspace">仅当前工作区</option></select>}</div>;
@@ -4754,6 +4339,7 @@ function App() {
                 ["language", "语言"],
                 ["data", "数据与会话"],
                 ["runtime", "Runtime"],
+                ["help", "帮助与功能指南"],
                 ["about", "关于 Tao"],
               ] as Array<[SettingsSection, string]>).map(([section, label]) => (
                 <button className={settingsSection === section ? "active" : ""} key={section} type="button" onClick={() => setSettingsSection(section)}>{label}</button>
@@ -4761,7 +4347,7 @@ function App() {
             </nav>
             <div className="workspace-content">
               {notice.text && notice.conversationId === null && <div className="workspace-notice">{notice.text}</div>}
-              {settingsSection === "models" ? (
+              {settingsSection === "help" ? <HelpGuide topic={helpTopic} onTopicChange={setHelpTopic} /> : settingsSection === "models" ? (
                 <div className="workspace-section form-section">
                   <div className="workspace-heading">
                     <span className="eyebrow">模型</span>
@@ -5180,16 +4766,16 @@ function App() {
             role="separator"
             aria-label="调整右侧栏宽度"
             aria-orientation="vertical"
-            aria-valuemin={RUNTIME_MIN_WIDTH}
-            aria-valuemax={RUNTIME_MAX_WIDTH}
-            aria-valuenow={runtimeWidth}
+            aria-valuemin={panelLayout.runtimeMin}
+            aria-valuemax={panelLayout.runtimeMax}
+            aria-valuenow={panelLayout.runtimeWidth}
             onPointerDown={(event) => beginResize("runtime", event)}
           />
         )}
         <aside className={`runtime-drawer ${rightPanelView === "files" ? "files-view" : ""}`} aria-label="右侧面板">
           <div className="runtime-drawer-header">
             <div>
-              <h2>{rightPanelView === "files" ? "文件" : mainView === "chat" ? "运行信息" : mainView === "customization" ? "配置检查器" : "设置摘要"}</h2>
+              <h2>{rightPanelView === "files" ? "文件" : rightPanelView === "context" ? "上下文" : mainView === "chat" ? "运行信息" : mainView === "customization" ? "配置检查器" : "设置摘要"}</h2>
               <p>{rightPanelView === "files" ? (activeConversation?.workspacePath || workspaceListing?.rootPath || "默认工作区") : mainView === "chat" ? (activeConversation?.title || "当前会话") : pageTitle}</p>
             </div>
             <div className="runtime-header-actions">
@@ -5205,11 +4791,12 @@ function App() {
               )}
             </div>
           </div>
-          <div className="right-panel-tabs" role="tablist" aria-label="右侧面板">
+          <div className={`right-panel-tabs ${mainView === "chat" ? "has-context" : ""}`} role="tablist" aria-label="右侧面板">
             <button className={rightPanelView === "runtime" ? "active" : ""} type="button" role="tab" aria-selected={rightPanelView === "runtime"} onClick={() => { setRightPanelView("runtime"); setFilesExpanded(false); }}>工作过程</button>
             <button className={rightPanelView === "files" ? "active" : ""} type="button" role="tab" aria-selected={rightPanelView === "files"} onClick={() => setRightPanelView("files")}>文件</button>
+            {mainView === "chat" && <button className={rightPanelView === "context" ? "active" : ""} type="button" role="tab" aria-selected={rightPanelView === "context"} onClick={() => { setRightPanelView("context"); setFilesExpanded(false); }}>上下文</button>}
           </div>
-          {rightPanelView === "files" ? (
+          {rightPanelView === "context" && mainView === "chat" ? <ContextPanel key={activeId} conversationId={activeId} generating={activeConversationGenerating} updateToken={contextUpdates[activeId]?.revision ?? 0} warning={contextUpdates[activeId]?.warning ?? ""} /> : rightPanelView === "files" ? (
             <div className="files-panel">
               <section className="file-preview-pane" aria-label="文件预览">
                 <div className="file-preview-toolbar">
@@ -5254,9 +4841,9 @@ function App() {
                     ) : workspaceMarkdownViewMode === "source" ? (
                       <pre className="markdown-source-preview"><code>{workspaceFile.content}</code></pre>
                     ) : (
-                      <WorkspaceMarkdownPreview
+                      <MarkdownContent variant="workspace"
                         content={workspaceFile.content}
-                        filePath={workspaceFile.path}
+                        messageId={workspaceFile.path}
                         copiedKey={copiedKey}
                         onCopy={copyText}
                       />
@@ -5337,7 +4924,12 @@ function App() {
                 )}
               </aside>
             </div>
-          ) : mainView === "chat" ? <>
+          ) : <>
+          {mainView === "chat" && <div className="member-navigation-host" ref={setMemberNavigationTarget} />}
+          <div className="runtime-scroll-container">
+          <div className="runtime-scroll-body" role="region" aria-label="工作过程记录" tabIndex={0} ref={workScroll.viewportRef} onScroll={workScroll.onScroll} onWheelCapture={workScroll.onWheelCapture} onPointerDownCapture={workScroll.onPointerDownCapture} onKeyDownCapture={workScroll.onKeyDownCapture}>
+          <div className="runtime-scroll-content">
+          {mainView === "chat" ? <>
           <div className="runtime-summary">
             <span className={`runtime-state-dot ${activeConversationGenerating ? "running" : runtimeHasError ? "error" : runtimeHost.ready ? "ready" : "preparing"}`} />
             <div>
@@ -5440,10 +5032,11 @@ function App() {
               <div><dt>当前组合</dt><dd>{editorProfile?.name ?? "未选择"} · v{editorProfile?.revision || 1}</dd></div>
               <div><dt>配置文件</dt><dd>%USERPROFILE%\.tao\agents\catalog.json</dd></div>
               <div><dt>提示词</dt><dd>{runtimeDraft.systemPrompt.trim() ? "已配置" : "未配置"}</dd></div>
-              <div><dt>加载方式</dt><dd>{runtimeDraft.systemPromptMode === "append" ? "追加默认提示词" : "替换默认提示词"}</dd></div>
-              <div><dt>Context</dt><dd>规划中</dd></div>
-              <div><dt>Skill</dt><dd>规划中</dd></div>
-              <div><dt>Extension</dt><dd>规划中</dd></div>
+              <div><dt>加载方式</dt><dd>{runtimeDraft.systemPromptMode === "append" ? "追加默认提示词" : "替换身份与角色"}</dd></div>
+              <div><dt>上下文预览</dt><dd>系统提示词页</dd></div>
+              <div><dt>上下文压缩</dt><dd>沿用内核默认</dd></div>
+              <div><dt>Skills</dt><dd>{runtimeDraft.skillsEnabled ? "已启用" : "已关闭"}</dd></div>
+              <div><dt>Extension</dt><dd>{runtimeDraft.extensionsEnabled ? "已启用" : "已关闭"} · 编辑器待开发</dd></div>
             </dl>
             <p className="runtime-note">定制页面只开放已经确认映射和安全边界的能力。</p>
           </> : <>
@@ -5460,6 +5053,9 @@ function App() {
             </dl>
             <p className="runtime-note">设置页管理全局默认值；会话中的选择只影响当前对话。</p>
           </>}
+          </div></div>
+          {!workScroll.following && mainView === "chat" && <button type="button" className="scroll-to-latest work-scroll-latest" onClick={workScroll.scrollToLatest}>↓ 最新记录</button>}
+          </div></>}
         </aside>
         </>
       )}

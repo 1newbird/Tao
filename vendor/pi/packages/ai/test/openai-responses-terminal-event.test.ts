@@ -247,15 +247,22 @@ describe("OpenAI Responses terminal event handling", () => {
 		const output = createOutput(model);
 		const stream = new AssistantMessageEventStream();
 		const observedStopReasons: AssistantMessage["stopReason"][] = [];
+		const observedPhases: string[] = [];
 		const push = stream.push.bind(stream);
 		stream.push = (event) => {
 			if ("partial" in event) observedStopReasons.push(event.partial.stopReason);
+			if (event.type === "text_start" || event.type === "text_end") {
+				const block = event.partial.content[event.contentIndex];
+				if (block.type === "text" && block.textSignature)
+					observedPhases.push(JSON.parse(block.textSignature).phase);
+			}
 			push(event);
 		};
 
 		await processResponsesStream(createPhasedMessageEvents(phases), output, stream, model);
 
 		expect(observedStopReasons).toEqual(expected);
+		expect(observedPhases).toEqual(phases);
 		expect(output.stopReason).toBe("stop");
 	});
 

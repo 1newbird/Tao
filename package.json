@@ -1,13 +1,14 @@
 {
   "name": "tao",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-dev.ps1",
     "test:agents": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agents.ps1",
+    "test:ui": "node scripts/test-ui-rendering.mjs",
     "preview": "vite preview",
     "preview:ui": "node scripts/preview-ui.mjs",
     "tao:prepare": "node scripts/prepare-tauri-release.mjs",
@@ -22,7 +23,9 @@
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "2.5.4",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",

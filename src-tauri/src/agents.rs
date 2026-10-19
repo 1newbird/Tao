@@ -71,6 +71,11 @@ pub fn normalize(mut catalog: AgentCatalog) -> Result<AgentCatalog, String> {
         if profile.custom_tool_ids.iter().any(|id| !tool_ids.contains(id)) { return Err(format!("组合 {} 引用了不存在的工具", profile.name)); }
     }
     if !profile_ids.contains(&catalog.default_profile_id) { return Err("默认组合不存在".into()); }
+    for profile in &catalog.profiles {
+        if profile.configuration.delegation.allowed_profile_ids.iter().any(|id| !profile_ids.contains(id)) {
+            return Err(format!("组合 {} 引用了不存在的子代理组合，请先移除委派引用", profile.name));
+        }
+    }
     let mut workspaces = HashSet::new();
     for default in &mut catalog.workspace_defaults {
         default.workspace_path = workspace_key(&default.workspace_path);
@@ -110,6 +115,14 @@ fn load_at(root: &Path) -> Result<AgentCatalog, String> {
 pub fn load(app: &AppHandle) -> Result<AgentCatalog, String> {
     let _guard = CATALOG_LOCK.lock().map_err(|_| "智能体配置锁不可用")?;
     load_at(&storage::app_data_root(app)?)
+}
+
+pub fn delegation_snapshots(app: &AppHandle, parent: Option<&AgentSnapshot>) -> Result<Vec<AgentSnapshot>, String> {
+    let Some(parent) = parent else { return Ok(Vec::new()); };
+    if !parent.configuration.delegation.enabled { return Ok(Vec::new()); }
+    let catalog = load(app)?;
+    parent.configuration.delegation.allowed_profile_ids.iter().map(|id| snapshot(&catalog, id)
+        .map_err(|_| format!("子代理组合 {id} 已不存在，请为当前会话应用更新后的组合"))).collect()
 }
 
 pub fn save(app: &AppHandle, catalog: AgentCatalog) -> Result<AgentCatalog, String> {
@@ -191,6 +204,38 @@ mod tests {
         let mut catalog = migrate(RuntimeConfiguration::default());
         catalog.profiles[0].custom_tool_ids.push("missing".into());
         assert!(normalize(catalog).is_err());
+    }
+
+    #[test]
+    fn delegation_defaults_validation_and_snapshot_are_compatible() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.delegation.enabled);
+        assert!(RuntimeConfiguration::default().delegation.enabled);
+        let mut catalog = migrate(legacy);
+        catalog.profiles[0].configuration.delegation.enabled = true;
+        assert!(normalize(catalog.clone()).is_ok());
+        catalog.profiles[0].configuration.delegation.allowed_profile_ids.push("missing".into());
+        assert!(normalize(catalog.clone()).is_err());
+        catalog.profiles[0].configuration.delegation.allowed_profile_ids = vec!["default".into()];
+        let original = normalize(catalog).unwrap();
+        let captured = snapshot(&original, "default").unwrap();
+        let mut edited = original.clone();
+        edited.profiles[0].configuration.delegation.max_concurrent = 2;
+        let revised = revise(normalize(edited).unwrap(), &original).unwrap();
+        assert_eq!(revised.profiles[0].revision, 2);
+        assert_eq!(captured.configuration.delegation.max_concurrent, 3);
+        let mut invalid = captured.configuration;
+        invalid.delegation.max_tasks = 33;
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+    }
+
+    #[test]
+    fn custom_tools_cannot_shadow_coordination_tools() {
+        for name in ["read_tao_doc", "spawn_agent", "get_agent_status", "wait_agent", "cancel_agent", "review_agent_task", "list_agents", "send_message", "read_agent_messages", "followup_task", "create_task", "list_tasks", "claim_task", "assign_task", "retry_agent_task", "cancel_task"] {
+            let mut configuration = RuntimeConfiguration::default();
+            configuration.custom_tools.push(CustomToolConfiguration { id: "fake".into(), name: name.into(), command: "echo bad".into(), ..Default::default() });
+            assert!(storage::normalize_runtime_configuration(configuration).is_err(), "{name}");
+        }
     }
 
     #[test]

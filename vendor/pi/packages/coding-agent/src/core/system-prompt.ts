@@ -2,11 +2,13 @@
  * System prompt construction and project context loading
  */
 
-import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
+export const DEFAULT_SYSTEM_IDENTITY =
+	"You are Tao, an assistant that helps users complete tasks using the context, tools, and workflows available in this conversation. Adapt your domain expertise and working method to the selected agent profile and the user's goal. Perform actions within the authorized scope and report results based on evidence.";
+
 export interface BuildSystemPromptOptions {
-	/** Custom system prompt (replaces default). */
+	/** Custom role prompt (replaces identity, retaining tool instructions and appended platform rules). */
 	customPrompt?: string;
 	/** Tools to include in prompt. Default: [read, bash, edit, write] */
 	selectedTools?: string[];
@@ -43,45 +45,13 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
 
-	if (customPrompt) {
-		let prompt = customPrompt;
-
-		if (appendSection) {
-			prompt += appendSection;
-		}
-
-		// Append project context files
-		if (contextFiles.length > 0) {
-			prompt += "\n\n<project_context>\n\n";
-			prompt += "Project-specific instructions and guidelines:\n\n";
-			for (const { path: filePath, content } of contextFiles) {
-				prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`;
-			}
-			prompt += "</project_context>\n";
-		}
-
-		// Append skills section (only if read tool is available)
-		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
-		if (customPromptHasRead && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
-		}
-
-		prompt += `\nCurrent working directory: ${promptCwd}\n`;
-
-		return prompt;
-	}
-
-	// Get absolute paths to documentation and examples
-	const readmePath = getReadmePath();
-	const docsPath = getDocsPath();
-	const examplesPath = getExamplesPath();
-
 	// Build tools list based on selected tools.
-	// A tool appears in Available tools only when the caller provides a one-line snippet.
+	// Every active tool is indexed. Optional snippets stay short; full schemas are separate.
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
-	const visibleTools = tools.filter((name) => !!toolSnippets?.[name]);
 	const toolsList =
-		visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets![name]}`).join("\n") : "(none)";
+		tools.length > 0
+			? tools.map((name) => `- ${name}${toolSnippets?.[name] ? `: ${toolSnippets[name]}` : ""}`).join("\n")
+			: "(none)";
 
 	// Build guidelines based on which tools are actually available
 	const guidelinesList: string[] = [];
@@ -118,24 +88,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	let prompt = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	let prompt = `${customPrompt || DEFAULT_SYSTEM_IDENTITY}
 
 Available tools:
 ${toolsList}
 
-In addition to the tools above, you may have access to other custom tools depending on the project.
+Tool descriptions and parameter schemas are supplied separately. Use only the tools actually provided.
 
 Guidelines:
-${guidelines}
-
-Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
-- Main documentation: ${readmePath}
-- Additional docs: ${docsPath}
-- Examples: ${examplesPath} (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`;
+${guidelines}`;
 
 	if (appendSection) {
 		prompt += appendSection;

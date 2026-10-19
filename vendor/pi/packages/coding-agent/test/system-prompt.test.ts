@@ -2,6 +2,22 @@ import { describe, expect, test } from "vitest";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 
 describe("buildSystemPrompt", () => {
+	test("custom role retains actual tool instructions and appended platform rules", () => {
+		const prompt = buildSystemPrompt({
+			customPrompt: "CUSTOM_ROLE",
+			selectedTools: ["read"],
+			toolSnippets: { read: "Read files" },
+			promptGuidelines: ["Read related files first"],
+			appendSystemPrompt: "PLATFORM_RULE",
+			cwd: "/workspace",
+		});
+		expect(prompt.startsWith("CUSTOM_ROLE")).toBe(true);
+		expect(prompt).not.toContain("You are Tao");
+		expect(prompt).toContain("- read: Read files");
+		expect(prompt).toContain("Read related files first");
+		expect(prompt).toContain("PLATFORM_RULE");
+		expect(prompt).toContain("Current working directory: /workspace");
+	});
 	describe("empty tools", () => {
 		test("shows (none) for empty tools list", () => {
 			const prompt = buildSystemPrompt({
@@ -46,17 +62,16 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- write:");
 		});
 
-		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
+		test("uses Tao identity without obsolete terminal-product documentation instructions", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
-			);
-			expect(prompt).toContain("environment variables (docs/environment-variables.md)");
+			expect(prompt).toContain("You are Tao");
+			expect(prompt).not.toContain("Pi documentation");
+			expect(prompt).not.toContain("docs/environment-variables.md");
 		});
 	});
 
@@ -75,7 +90,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		});
 
-		test("omits custom tools from available tools section when promptSnippet is not provided", () => {
+		test("indexes custom tool names without inventing descriptions when no snippet is provided", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "dynamic_tool"],
 				contextFiles: [],
@@ -83,7 +98,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("dynamic_tool");
+			expect(prompt).toContain("- dynamic_tool\n");
+			expect(prompt).not.toContain("- dynamic_tool:");
 		});
 	});
 

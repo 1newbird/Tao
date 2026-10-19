@@ -15,8 +15,12 @@ try {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & node scripts/test-runtime-policy.mjs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & node --test scripts/test-multi-agent.mjs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $runtimeNode = Join-Path $projectRoot 'src-tauri/resources/node/node.exe'
     if (-not (Test-Path -LiteralPath $runtimeNode)) { $runtimeNode = 'node' }
+    & node --experimental-strip-types --test scripts/test-context.mjs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $runtimeNode scripts/verify-runtime-tool-flow.mjs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo test --manifest-path src-tauri/Cargo.toml --lib

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { catalogWithEditor, editorConfiguration, emptyConfiguration, exportProfile, mergeCatalog, safeSnapshot } from "../src/agent-profiles.ts";
+import { catalogWithEditor, defaultDelegation, editorConfiguration, emptyConfiguration, exportProfile, mergeCatalog, safeSnapshot } from "../src/agent-profiles.ts";
 
 const tool = { id: "lookup", name: "lookup", label: "查询", description: "test", kind: "http", enabled: true, permissionMode: "ask", command: "", executable: "", arguments: "[]", timeoutMs: 1000, allowedHosts: ["example.com"], method: "GET", url: "https://example.com/?q={{input}}", headers: '{"Authorization":"Bearer {{env:TOOL_KEY}}"}', bodyTemplate: "", inputSchema: '{"type":"object"}' };
+assert.equal(emptyConfiguration().delegation.enabled, true);
+assert.equal(defaultDelegation().enabled, false, "旧的缺省委派配置不应自动开启");
 const catalog = { schemaVersion: 1, revision: 1, defaultProfileId: "a", profiles: [
   { id: "a", name: "A", description: "", revision: 1, configuration: { ...emptyConfiguration(), systemPrompt: "A" }, customToolIds: ["lookup"] },
   { id: "b", name: "B", description: "", revision: 1, configuration: { ...emptyConfiguration(), systemPrompt: "B" }, customToolIds: [] },
@@ -33,4 +35,11 @@ const mixedExport = exportProfile({ ...catalog, tools: [mixedCredentialTool] }, 
 assert(!mixedExport.tools[0].headers.includes("private-key"));
 assert(mixedExport.tools[0].headers.includes("{{env:TOOL_KEY}}"));
 assert(mixedCredentialTool.headers.includes("private-key"));
+const teamCatalog = structuredClone(catalog);
+teamCatalog.profiles[0].configuration.delegation = { ...defaultDelegation(), enabled: true, allowedProfileIds: ["a", "b"] };
+const exportedTeam = exportProfile(teamCatalog, "a");
+assert.equal(exportedTeam.profiles.length, 2);
+const mergedTeam = mergeCatalog(teamCatalog, exportedTeam);
+assert.deepEqual(mergedTeam.profiles[2].configuration.delegation.allowedProfileIds, ["a_import", "b_import"]);
+assert.deepEqual(teamCatalog.profiles[0].configuration.delegation.allowedProfileIds, ["a", "b"]);
 console.log("通过：组合编辑隔离、工具引用、导入合并、模板占位符和导出脱敏。");

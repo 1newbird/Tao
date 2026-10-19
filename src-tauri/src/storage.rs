@@ -103,6 +103,13 @@ pub fn save_runtime_configuration(
 pub(crate) fn normalize_runtime_configuration(
     configuration: RuntimeConfiguration,
 ) -> Result<RuntimeConfiguration, String> {
+    let delegation = &configuration.delegation;
+    if !(1..=4).contains(&delegation.max_concurrent) || !(1..=32).contains(&delegation.max_tasks)
+        || !(1000..=1_200_000).contains(&delegation.timeout_ms) || !(1..=100).contains(&delegation.max_turns)
+        || delegation.allowed_profile_ids.len() > 100
+        || delegation.allowed_profile_ids.iter().any(|id| id.is_empty() || id.len() > 100 || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))) {
+        return Err("子代理的并发、任务数、时长、轮次或组合列表无效".into());
+    }
     if !matches!(configuration.system_prompt_mode.as_str(), "append" | "replace") {
         return Err("系统提示词模式无效".to_string());
     }
@@ -170,6 +177,10 @@ pub(crate) fn normalize_runtime_configuration(
         if matches!(
             tool.name.as_str(),
             "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls"
+                | "spawn_agent" | "get_agent_status" | "wait_agent" | "cancel_agent" | "review_agent_task"
+                | "read_tao_doc"
+                | "list_agents" | "send_message" | "read_agent_messages" | "followup_task"
+                | "create_task" | "list_tasks" | "claim_task" | "assign_task" | "retry_agent_task" | "cancel_task"
         ) {
             return Err(format!("自定义工具不能使用内置工具名称：{}", tool.name));
         }
@@ -220,6 +231,7 @@ pub(crate) fn normalize_runtime_configuration(
         extensions_enabled: configuration.extensions_enabled,
         custom_tools,
         tool_permissions,
+        delegation: configuration.delegation,
     })
 }
 
@@ -289,6 +301,14 @@ pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<(), String> {
     validate_id(id)?;
     let root = app_data_root(app)?;
     let conversation_root = root.join("conversations").join(id);
+    let team_root = root.join("teams").join(id);
+    let context_file = root.join("contexts").join(format!("{id}.json"));
+    if context_file.exists() {
+        fs::remove_file(&context_file).map_err(|error| format!("无法删除上下文快照：{error}"))?;
+    }
+    if team_root.exists() {
+        fs::remove_dir_all(&team_root).map_err(|error| format!("无法删除子代理任务记录：{error}"))?;
+    }
     if conversation_root.exists() {
         fs::remove_dir_all(&conversation_root)
             .map_err(|error| format!("无法删除对话：{error}"))?;

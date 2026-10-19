@@ -1,0 +1,9 @@
+export interface TeamRun { runId: string; createdAt: number; closed: boolean; members: number; tasks: number }
+export interface TeamAgent { id: string; name: string; state: string; taskId: string | null; retired: boolean; profileId: string; revision: number }
+export interface TeamTask { id: string; title: string; description: string; state: string; version: number; assignedAgentId: string | null; attemptId: string | null; dependsOn: string[]; reviewedAt?: number }
+export interface TeamAttempt { id: string; taskId: string; agentId: string; generation: number; state: string; result: string; error: string; retryReason?: string; resultTruncated?: boolean; modelTurns?: number; startedAt?: number; endedAt?: number; usage?: Record<string, number> }
+export interface TeamMessage { id: string; from: string; to: string; kind: string; body: string; delivery: string; deliveryReason?: string; createdAt: number; deliveredAt?: number; toTaskId?: string; targetAttemptId?: string; replyTo?: string }
+export interface TeamEvent { id: string; agentId: string; taskId: string; attemptId: string; kind: string; text: string; status: string; createdAt: number }
+export interface TeamView { conversationId: string; runId: string; rootAgentId: string; createdAt: number; closed: boolean; live: boolean; closeReason: string; sequence: number; agents: TeamAgent[]; tasks: TeamTask[]; attempts: TeamAttempt[]; messages: TeamMessage[]; events: TeamEvent[]; hasEarlierEvents: boolean; droppedEvents: number }
+export const teamState: Record<string, string> = { idle: "空闲", closed: "已结束", pending: "待认领", blocked: "等待依赖验收", queued: "排队", preparing: "准备中", running: "执行中", waiting_permission: "待确认", cancelling: "停止中", submitted: "已提交", accepted: "已验收", rejected: "未通过", cancelled: "已取消", failed: "失败", interrupted: "已中断" };
+export const deliveryState: Record<string, string> = { queued: "待送达", delivered: "已进入上下文或工具结果", undelivered: "未送达" };

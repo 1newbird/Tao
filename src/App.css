@@ -686,15 +686,16 @@ button {
 
 .chat-pane {
   --chat-content-width: min(850px, calc(100% - 64px));
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: 68px minmax(0, 1fr) auto;
   background: #ffffff;
   overflow: hidden;
 }
 
 .chat-header {
+  flex: 0 0 68px;
   container-type: inline-size;
   display: block;
   min-width: 0;
@@ -868,8 +869,11 @@ button {
 
 .chat-header p {
   margin: 4px 0 0;
+  overflow: hidden;
   color: #888884;
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-chip {
@@ -1014,10 +1018,19 @@ button {
 }
 
 .message-viewport {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
   scroll-behavior: auto;
+  overscroll-behavior-y: contain;
 }
+
+.message-scroll-content { min-height: 100%; min-width: 0; }
+.message-viewport:focus-visible, .runtime-scroll-body:focus-visible { outline: 2px solid var(--tao-accent-line); outline-offset: -2px; }
+.scroll-to-latest { position: absolute; bottom: calc(100% + 10px); left: 50%; z-index: 8; transform: translateX(-50%); padding: 7px 13px; border: 1px solid #deded9; border-radius: 20px; background: #ffffff; color: #4c4c47; box-shadow: 0 3px 14px #00000012; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.scroll-to-latest:hover { background: #f4f4f1; }
+.app-shell.theme-dark .scroll-to-latest { border-color: #494942; background: #2b2b27; color: #e2e2db; }
+.app-shell.theme-dark .scroll-to-latest:hover { background: #353530; }
 
 .message-column {
   width: min(820px, var(--chat-content-width));
@@ -1281,6 +1294,11 @@ button {
   opacity: 0;
 }
 
+.message.user .message-copy-button {
+  display: block;
+  margin-left: auto;
+}
+
 .message-body:hover .message-copy-button,
 .message-copy-button:focus-visible {
   opacity: 1;
@@ -1433,9 +1451,6 @@ button {
 }
 
 .activity-scroll {
-  max-height: 260px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   padding: 11px 2px 0 0;
 }
 
@@ -1568,8 +1583,8 @@ button {
   color: #383835;
   font-size: 14px;
   line-height: 1.72;
-  white-space: pre-wrap;
 }
+.activity-preamble-text .markdown-content { font-size: 14px; line-height: 1.72; }
 
 .activity-state-mark {
   width: 14px;
@@ -1738,6 +1753,7 @@ button {
 }
 
 .composer-area {
+  flex: none;
   container-type: inline-size;
   position: relative;
   width: var(--chat-content-width);
@@ -2511,6 +2527,7 @@ button {
 }
 
 .workspace-page {
+  flex: 1;
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -3674,6 +3691,7 @@ button {
 .runtime-drawer {
   display: flex;
   min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
   flex-direction: column;
@@ -3694,6 +3712,7 @@ button {
 
 .runtime-drawer-header {
   display: flex;
+  flex-shrink: 0;
   align-items: flex-start;
   justify-content: space-between;
   padding-right: 42px;
@@ -3750,6 +3769,7 @@ button {
 
 .right-panel-tabs {
   display: grid;
+  flex-shrink: 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   margin: 12px 0 0;
@@ -4537,6 +4557,11 @@ button {
   padding-top: 14px;
   border-top: 1px solid #eeeeec;
 }
+
+.runtime-scroll-container { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
+.runtime-scroll-body { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.runtime-scroll-content { min-width: 0; padding-bottom: 14px; }
+.work-scroll-latest { bottom: 10px; }
 
 .right-section-title {
   margin-bottom: 8px;

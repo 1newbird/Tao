@@ -133,6 +133,11 @@ async function main() {
   for (const [path, label] of [
     [nodeExe, "内置 Node"],
     [runtimeScript, "Tao Runtime"],
+    [join(resourceRoot, "runtime", "policy.mjs"), "Tao 权限模块"],
+    [join(resourceRoot, "runtime", "multi-agent.mjs"), "Tao 多智能体协调器"],
+    [join(resourceRoot, "runtime", "context.mjs"), "Tao 上下文模块"],
+    [join(resourceRoot, "runtime", "prompt-policy.mjs"), "Tao 提示词策略"],
+    ...["tools", "collaboration", "permissions", "customization"].map((topic) => [join(resourceRoot, "runtime", "docs", `${topic}.md`), `Tao 手册 ${topic}`]),
     [preflight, "tsx preflight"],
     [loader, "tsx loader"],
     [join(piRoot, "packages", "coding-agent", "src", "index.ts"), "Pi 入口"],

@@ -15,6 +15,11 @@ src-tauri/resources/*
 !src-tauri/resources/.gitkeep
 .tao-release-cache
 .tao-dev-config.json
+.multi-agent-test-*/
+.runtime-tool-flow-*/
+.context-test-*/
+.ui-render-test-*/
+.tao-ui-qa/
 
 # Tao user data and local development overrides
 .tao/

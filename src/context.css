@@ -1,0 +1,43 @@
+.context-preview { margin-top: 24px; padding: 20px; border: 1px solid var(--profile-edge); border-radius: 12px; background: var(--profile-wash); color: var(--profile-text); }
+.context-heading { display: flex; flex: none; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.context-heading h3, .context-tools h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.context-heading p { margin: 6px 0 0; font-size: 11px; line-height: 1.7; color: var(--profile-muted); }
+.context-preview button, .context-panel button { flex: none; padding: 7px 10px; border: 1px solid var(--profile-edge); border-radius: 7px; background: var(--profile-surface); color: var(--profile-text); font-size: 11px; cursor: pointer; }
+.context-preview button:hover:not(:disabled), .context-panel button:hover:not(:disabled) { background: var(--profile-hover); }
+.context-preview button:disabled, .context-panel button:disabled { opacity: .5; cursor: default; }
+.context-policy { margin: 12px 0 16px; color: var(--profile-muted); font-size: 10px; overflow-wrap: anywhere; }
+.context-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+.context-tabs button.selected { background: var(--tao-accent-soft); border-color: var(--tao-accent-line); }
+.context-sections { margin: 0; padding-left: 20px; }
+.context-disclosure { min-width: 0; margin: 8px 0; border: 1px solid var(--profile-edge); border-radius: 8px; background: var(--profile-surface); overflow: hidden; }
+.context-disclosure > summary { padding: 11px 12px; font-size: 12px; line-height: 1.6; cursor: pointer; overflow-wrap: anywhere; }
+.context-disclosure summary strong { font-weight: 500; }
+.context-disclosure summary small { margin-left: 8px; color: var(--profile-muted); font-size: 10px; }
+.context-disclosure pre, .context-prompt { margin: 0; padding: 14px; max-height: 480px; min-width: 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--profile-text); font: 11px/1.85 ui-monospace, Consolas, monospace; }
+.context-prompt { border-radius: 8px; border: 1px solid var(--profile-edge); background: var(--profile-surface); }
+.context-disclosure .context-prompt { border: 0; border-top: 1px solid var(--profile-edge); border-radius: 0; }
+.context-disclosure-body { padding: 0 12px 12px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.context-disclosure-body pre { padding: 8px 0 0; }
+.context-tools { margin: 22px 0; }
+.context-tools h3 span { margin-left: 5px; color: var(--profile-muted); font-size: 10px; font-weight: 400; }
+.context-muted { color: var(--profile-muted); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.context-error { color: #b15d43; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.context-panel { display: flex; flex: 1; min-height: 0; min-width: 0; flex-direction: column; padding-top: 18px; color: var(--profile-text); }
+.context-panel-scroll { flex: 1; min-height: 0; margin-top: 14px; padding-right: 2px; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.context-panel-scroll > h3 { margin: 22px 0 12px; font-size: 12px; }
+.context-empty { padding: 18px 14px; border: 1px dashed var(--profile-edge); border-radius: 9px; font-size: 12px; line-height: 1.8; }
+.context-empty p { margin: 8px 0 0; color: var(--profile-muted); }
+.context-change { padding: 10px 12px; border-radius: 8px; background: var(--tao-accent-soft); font-size: 11px; line-height: 1.8; }
+.context-facts { margin: 16px 0; font-size: 11px; line-height: 1.8; }
+.context-facts > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; margin: 8px 0; }
+.context-facts dt { color: var(--profile-muted); }
+.context-facts dd { margin: 0; overflow-wrap: anywhere; }
+.context-sources { margin: 0 0 20px; padding-left: 20px; font-size: 11px; }
+.context-sources li { margin: 10px 0; line-height: 1.7; }
+.context-sources strong { display: block; font-weight: 500; }
+.context-sources small { color: var(--profile-muted); overflow-wrap: anywhere; }
+.context-message-list { padding: 0 12px 12px; }
+.context-message-list > div { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; padding: 5px 0; font-size: 11px; }
+.context-message-list small { color: var(--profile-muted); }
+.context-template-button { margin: 12px 0 20px; }
+.right-panel-tabs.has-context { grid-template-columns: repeat(3, minmax(0, 1fr)); }

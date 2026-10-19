@@ -36,6 +36,20 @@ export interface RuntimeConfiguration {
   extensionsEnabled: boolean;
   customTools: CustomToolConfiguration[];
   toolPermissions: Record<string, ToolPermissionConfiguration>;
+  delegation?: DelegationConfiguration;
+}
+
+export interface DelegationConfiguration {
+  enabled: boolean;
+  allowedProfileIds: string[];
+  maxConcurrent: number;
+  maxTasks: number;
+  timeoutMs: number;
+  maxTurns: number;
+}
+
+export function defaultDelegation(): DelegationConfiguration {
+  return { enabled: false, allowedProfileIds: [], maxConcurrent: 3, maxTasks: 8, timeoutMs: 600_000, maxTurns: 32 };
 }
 
 export interface AgentModelDefaults {
@@ -72,7 +86,7 @@ export interface AgentCatalog {
 }
 
 export function emptyConfiguration(): RuntimeConfiguration {
-  return { enabled: true, systemPromptMode: "append", systemPrompt: "", conversationPrompt: "", toolMode: "custom", enabledTools: [], skillsEnabled: false, extensionsEnabled: false, customTools: [], toolPermissions: {} };
+  return { enabled: true, systemPromptMode: "append", systemPrompt: "", conversationPrompt: "", toolMode: "custom", enabledTools: [], skillsEnabled: false, extensionsEnabled: false, customTools: [], toolPermissions: {}, delegation: { ...defaultDelegation(), enabled: true } };
 }
 
 export function editorConfiguration(catalog: AgentCatalog, profileId: string): RuntimeConfiguration {
@@ -138,7 +152,18 @@ export function exportedTool(tool: CustomToolConfiguration): CustomToolConfigura
 export function exportProfile(catalog: AgentCatalog, id: string): AgentCatalog {
   const profile = catalog.profiles.find((item) => item.id === id);
   if (!profile) throw new Error("找不到组合");
-  return { schemaVersion: 1, revision: 1, defaultProfileId: id, profiles: [structuredClone(profile)], tools: catalog.tools.filter((tool) => profile.customToolIds.includes(tool.id)).map(exportedTool), workspaceDefaults: [] };
+  const included = new Set<string>();
+  const visit = (profileId: string) => {
+    if (included.has(profileId)) return;
+    const item = catalog.profiles.find((candidate) => candidate.id === profileId);
+    if (!item) throw new Error(`子代理组合 ${profileId} 不存在`);
+    included.add(profileId);
+    for (const child of item.configuration.delegation?.allowedProfileIds ?? []) visit(child);
+  };
+  visit(id);
+  const profiles = catalog.profiles.filter((item) => included.has(item.id));
+  const tools = new Set(profiles.flatMap((item) => item.customToolIds));
+  return { schemaVersion: 1, revision: 1, defaultProfileId: id, profiles: structuredClone(profiles), tools: catalog.tools.filter((tool) => tools.has(tool.id)).map(exportedTool), workspaceDefaults: [] };
 }
 
 export function safeSnapshot(snapshot: AgentSnapshot | null | undefined): AgentSnapshot | null | undefined {
@@ -160,10 +185,22 @@ export function mergeCatalog(target: AgentCatalog, imported: AgentCatalog): Agen
       toolIds.set(tool.id, id);
     }
   }
+  const profileIds = new Map<string, string>();
+  const usedIds = new Set(result.profiles.map((profile) => profile.id));
   for (const profile of imported.profiles) {
     let id = profile.id;
-    while (result.profiles.some((item) => item.id === id)) id += "_import";
-    result.profiles.push({ ...profile, id, revision: 0, customToolIds: profile.customToolIds.map((toolId) => toolIds.get(toolId) ?? toolId) });
+    while (usedIds.has(id)) id += "_import";
+    usedIds.add(id);
+    profileIds.set(profile.id, id);
+  }
+  for (const profile of imported.profiles) {
+    const configuration = structuredClone(profile.configuration);
+    if (configuration.delegation) configuration.delegation.allowedProfileIds = configuration.delegation.allowedProfileIds.map((child) => {
+      const mapped = profileIds.get(child);
+      if (!mapped) throw new Error(`导入文件缺少子代理组合 ${child}`);
+      return mapped;
+    });
+    result.profiles.push({ ...profile, id: profileIds.get(profile.id)!, revision: 0, configuration, customToolIds: profile.customToolIds.map((toolId) => toolIds.get(toolId) ?? toolId) });
   }
   return result;
 }

@@ -205,6 +205,8 @@ pub struct RuntimeConfiguration {
     #[serde(default)]
     pub custom_tools: Vec<CustomToolConfiguration>,
     pub tool_permissions: BTreeMap<String, ToolPermissionConfiguration>,
+    #[serde(default)]
+    pub delegation: DelegationConfiguration,
 }
 
 impl Default for RuntimeConfiguration {
@@ -220,7 +222,25 @@ impl Default for RuntimeConfiguration {
             extensions_enabled: false,
             custom_tools: Vec::new(),
             tool_permissions: BTreeMap::new(),
+            delegation: DelegationConfiguration { enabled: true, ..Default::default() },
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DelegationConfiguration {
+    pub enabled: bool,
+    pub allowed_profile_ids: Vec<String>,
+    pub max_concurrent: u32,
+    pub max_tasks: u32,
+    pub timeout_ms: u64,
+    pub max_turns: u32,
+}
+
+impl Default for DelegationConfiguration {
+    fn default() -> Self {
+        Self { enabled: false, allowed_profile_ids: Vec::new(), max_concurrent: 3, max_tasks: 8, timeout_ms: 600_000, max_turns: 32 }
     }
 }
 

@@ -90,6 +90,14 @@ npm.cmd run tao:verify
 node scripts/verify-tauri-release.mjs --resource-root 'D:\software_setup\tao'
 ```
 
+对已提取的 MSI 资源进一步跑完整 SDK/工具/协作模拟链路（使用包内 Node，隔离测试数据与本机模拟网关，不调用真实模型）：
+
+```powershell
+& '<提取目录>\PFiles\Tao\node\node.exe' scripts/verify-runtime-tool-flow.mjs --resource-root '<提取目录>\PFiles\Tao'
+```
+
+该回归覆盖实际打包的依赖与运行文件；不代替 WebView2、原生窗口和真实模型的安装后验收。
+
 准备 NSIS 并尝试生成 NSIS 安装包：
 
 ```powershell
@@ -105,7 +113,7 @@ NSIS 当前不作为默认方式，是因为 Pi 资源和 Node 运行时较大�
 ```text
 <Tao 项目根目录>\
 src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
-Tao_0.1.3_x64_en-US.msi
+Tao_0.1.4_x64_en-US.msi
 ```
 
 如果执行 `npm.cmd run tao:release -- 2.1`，文件名会变为：
@@ -135,7 +143,11 @@ src-tauri\resources\
 <Tao 安装目录>/
 ├─ tao.exe
 ├─ node/node.exe
-├─ runtime/tao-runtime.mjs
+├─ runtime/
+│  ├─ tao-runtime.mjs
+│  ├─ context.mjs
+│  ├─ prompt-policy.mjs
+│  └─ docs/                # 四个按需模型运行专题
 ├─ pi/
 │  ├─ packages/
 │  ├─ node_modules/
@@ -212,6 +224,15 @@ npm.cmd run tao:release -- 2.1
 - 发布后用户的会话和设置仍在用户目录，不应由安装包覆盖。
 
 ## 10. 当前发布验收状态
+
+2026-10-19 本机 `0.1.4` 编译与包资源验收：
+
+- 源码 `check`、UI 自动回归、完整 `test:agents` 通过；包含 46 项协调器、6 项上下文、12 项 Rust 测试以及实际 SDK + 本地模拟网关流程。
+- 新版界面在浏览器模拟数据中验证默认/合成预览、角色替换、旧快照、成员导航与深色 900×760 分栏；修复标题区状态文字在主区域 420px 时被裁剪。
+- MSI 文件表核对 18,980 个文件、40 个模型数据文件；新增上下文、策略及四个运行专题随包提供。
+- MSI 行政提取后，使用其实际 Node、Runtime 和内核通过双路径 ready/ping 及完整模拟网关回归；12 个关键文件与源文件/准备资源字节一致，exe 仅相差 Tauri 的 `UNK → MSI` 类型标记。未覆盖本机现有安装或用户数据。
+- [Tao_0.1.4_x64_en-US.msi](../../src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Tao_0.1.4_x64_en-US.msi) 为 74.9 MiB（78,549,592 字节），SHA-256 `a7fba0b0fb18caeb6da36b005feec871113a9e0e6e7b2fdd8338e5a9e8bb0620`。与 0.1.3 使用相同 UpgradeCode、不同 ProductCode。
+- 用户已确认 0.1.4 试用效果正常并授权发布、push。真实模型质量、原生多窗口完整异常路径及干净 Windows 环境继续专项验收；行政提取和模拟网关不代替这些项目。
 
 2026-10-12 本机 `0.1.3` 后台窗口修复与打包验证：
 

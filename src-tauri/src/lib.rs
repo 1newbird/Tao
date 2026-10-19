@@ -4,6 +4,8 @@ mod runtime;
 mod pi;
 mod storage;
 mod agents;
+mod collaboration;
+mod context;
 
 use models::{
     AgentCatalog, AppSettings, AppState, AttachmentReference, ConnectionTestRequest, ConnectionTestResult,
@@ -526,6 +528,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_runtime_status,
+            collaboration::get_collaboration,
+            collaboration::control_collaboration,
+            collaboration::open_member_window,
+            collaboration::focus_main_window,
+            collaboration::get_member_appearance,
+            context::preview_context,
+            context::get_conversation_context,
             start_runtime,
             stop_runtime,
             get_app_state,
