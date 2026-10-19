@@ -1,0 +1,10 @@
+Required Notice: Copyright (c) 2026 Tao contributors.
+
+Tao's original code and documentation are licensed under the PolyForm
+Noncommercial License 1.0.0 in LICENSE, except where a file or component
+is identified as third-party material or carries a different license.
+
+Third-party code, including the source snapshot in vendor/pi and the
+dependencies used by Tao, remains subject to its original licenses.
+Tao's license does not replace or restrict those existing licenses.
+See THIRD_PARTY_NOTICES.md for sources and notice locations.

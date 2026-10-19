@@ -62,10 +62,10 @@ npm.cmd run tao:release:nsis -- 2.1
 
 1. 下载或复用 WiX 3.14.1 官方 NuGet 包，校验 SHA-512，放入项目的 `src-tauri/target/.tauri/` 缓存；
 2. 下载或复用 Node.js 22.19.0 Windows x64 压缩包，首次下载时校验官方 SHA-256；
-3. 从空的 `src-tauri/resources` 重新准备 Tao Runtime、Pi 源码、模型数据、运行依赖和 Node；
-4. 使用内置 Node 分别按普通 Windows 路径和 `\\?\` 扩展路径启动发布资源，等待 Runtime 真正输出 `ready` 并确认 `ping` 响应；
+3. 从空的 `src-tauri/resources` 重新准备 Tao Runtime、Pi 源码、模型数据、运行依赖和 Node，复制根目录 `LICENSE`/`NOTICE`/`THIRD_PARTY_NOTICES.md`、上游 `pi/LICENSE` 和官方运行包 `node/LICENSE`，将声明 SHA-256 写入资源清单；
+4. 校验许可声明及其 SHA-256，使用内置 Node 分别按普通 Windows 路径和 `\\?\` 扩展路径启动发布资源，等待 Runtime 真正输出 `ready` 并确认 `ping` 响应；
 5. 构建前端和 Rust x86_64 Release；
-6. 生成 MSI，并检查 MSI 文件表中 Node、Runtime、Pi 入口、tsx loader 和模型数据；
+6. 生成 MSI，并检查 MSI 文件表中 Node、Runtime、Pi 入口、tsx loader、模型数据及上述五份许可声明的安装位置；
 7. 输出安装包大小、SHA-256 和 `.tao-release-cache/release-report.json`。
 
 Tauri 的 `beforeBuildCommand` 也执行第 3、4 步。因此直接执行 `npm.cmd run tauri build` 时，不会静默生成缺少 Runtime 资源的安装包。
@@ -97,6 +97,8 @@ node scripts/verify-tauri-release.mjs --resource-root 'D:\software_setup\tao'
 ```
 
 该回归覆盖实际打包的依赖与运行文件；不代替 WebView2、原生窗口和真实模型的安装后验收。
+
+许可要求从采用 PolyForm Noncommercial 1.0.0 的源码提交开始生效。旧版安装目录没有新增声明及清单字段时，新版资源验证会失败，需用对应版本的验证脚本检查历史产物；不要为通过检查而直接改写已发布 MSI。完整许可适用范围与依赖审核事项见根目录 [第三方许可说明](../../THIRD_PARTY_NOTICES.md)。
 
 准备 NSIS 并尝试生成 NSIS 安装包：
 

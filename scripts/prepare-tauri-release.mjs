@@ -4,6 +4,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { copyReleaseLicenses } from "./release-licenses.mjs";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -140,6 +141,13 @@ async function prepareResources() {
   await ensureFile(join(piNodeModules, "tsx", "dist", "loader.mjs"), "Pi tsx loader");
   await ensureFile(piPackage, "Pi package.json");
   await ensureFile(piTsconfig, "Pi tsconfig.json");
+  for (const path of [
+    join(projectRoot, "LICENSE"),
+    join(projectRoot, "NOTICE"),
+    join(projectRoot, "THIRD_PARTY_NOTICES.md"),
+    join(piRoot, "LICENSE"),
+    join(nodeExtractRoot, "LICENSE"),
+  ]) await ensureFile(path, "许可声明");
 
   await rm(resourceRoot, { recursive: true, force: true });
   await mkdir(resourceRoot, { recursive: true });
@@ -164,16 +172,20 @@ async function prepareResources() {
   }
 
   await copyTree(nodeBinaryPath, join(resourceRoot, "node", "node.exe"));
+  const licenses = await copyReleaseLicenses({ projectRoot, nodeExtractRoot, resourceRoot });
   await writeFile(
     join(resourceRoot, "RELEASE-MANIFEST.json"),
     `${JSON.stringify({
       platform: "windows-x64",
       nodeVersion,
       piSource: "vendor/pi",
+      taoLicense: "PolyForm-Noncommercial-1.0.0",
+      licenses,
       generatedAt: new Date().toISOString(),
     }, null, 2)}\n`,
     "utf8",
   );
+  log(`已复制 ${licenses.length} 份许可声明并记录 SHA-256`);
 }
 
 async function main() {

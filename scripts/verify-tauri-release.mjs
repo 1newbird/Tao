@@ -3,6 +3,7 @@ import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { verifyReleaseLicenses } from "./release-licenses.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const resourceRoot = process.argv[2] === "--resource-root" && process.argv[3]
@@ -145,6 +146,9 @@ async function main() {
     [join(piRoot, "tsconfig.json"), "Pi tsconfig.json"],
     [join(resourceRoot, "RELEASE-MANIFEST.json"), "发布清单"],
   ]) await requireFile(path, label);
+
+  const licenseCount = await verifyReleaseLicenses(resourceRoot);
+  log(`${licenseCount} 份许可声明完整，SHA-256 与发布清单一致`);
 
   const modelData = join(piRoot, "packages", "ai", "src", "providers", "data");
   const modelFiles = (await readdir(modelData)).filter((name) => name.endsWith(".json"));

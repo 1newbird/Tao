@@ -67,6 +67,7 @@ Secret
 - `package.json`
 - `package-lock.json`
 - `README.md`
+- `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`、`CONTRIBUTING.md`
 - `docs/`
 - `vendor/pi` 源码，不含 `vendor/pi/node_modules`
 - `.vscode/extensions.json`
@@ -111,8 +112,10 @@ npm.cmd run tauri dev
 
 ## 6. 发布前检查
 
+- Tao 原创部分采用 PolyForm Noncommercial 1.0.0，第三方仍保留原许可；新增或变更依赖时复核其声明与其他分发义务，包括编译进前端/原生程序的依赖。
 - `scripts\tao.ps1 check` 通过。
 - `npm.cmd run tao:prepare` 和 `npm.cmd run tao:verify` 通过。
+- 确认资源根目录的 `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`，以及 `pi/LICENSE` 和 `node/LICENSE` 均已生成。`tao:verify` 对照资源清单校验内容 SHA-256；MSI 文件表检查要求这些声明位于对应安装位置，不能由依赖目录里的同名文件代替。
 - 确认 `src-tauri/resources` 没有被提交。
 - 执行：
 

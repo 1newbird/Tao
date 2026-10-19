@@ -52,6 +52,11 @@ function Get-DirectoryPath([string]$id) {
 $required = @(
     'tao.exe',
     'node\node.exe',
+    'LICENSE',
+    'NOTICE',
+    'THIRD_PARTY_NOTICES.md',
+    'pi\LICENSE',
+    'node\LICENSE',
     'runtime\tao-runtime.mjs',
     'runtime\policy.mjs',
     'runtime\multi-agent.mjs',
@@ -71,6 +76,7 @@ $required = @(
     'RELEASE-MANIFEST.json'
 )
 $found = @{}
+$presentPaths = @{}
 $requiredNames = @{}
 foreach ($suffix in $required) { $requiredNames[($suffix -split '\\')[-1]] = $true }
 $modelFiles = 0
@@ -89,6 +95,7 @@ try {
             continue
         }
         $path = (Get-DirectoryPath $components[$componentId]) + '\' + $name
+        $presentPaths[$path] = $true
         foreach ($suffix in $required) {
             if ($path.EndsWith(('\' + $suffix), [System.StringComparison]::OrdinalIgnoreCase)) {
                 $found[$suffix] = $path
@@ -100,9 +107,13 @@ try {
     }
 } finally { $view.Close() }
 
+if (-not $found.ContainsKey('tao.exe')) { throw 'MSI is missing tao.exe' }
+$appDirectory = Split-Path -Path $found['tao.exe'] -Parent
 foreach ($suffix in $required) {
-    if (-not $found.ContainsKey($suffix)) { throw "MSI is missing required resource: $suffix" }
-    Write-Host "[Tao MSI] $suffix -> $($found[$suffix])"
+    # Root LICENSE must not be satisfied by a dependency's nested LICENSE.
+    $expectedPath = Join-Path -Path $appDirectory -ChildPath $suffix
+    if (-not $presentPaths.ContainsKey($expectedPath)) { throw "MSI is missing required resource: $suffix" }
+    Write-Host "[Tao MSI] $suffix -> $expectedPath"
 }
 if ($modelFiles -lt 1) { throw 'MSI is missing Pi model data' }
 
