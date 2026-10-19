@@ -233,6 +233,7 @@ npm.cmd run tao:release -- 2.1
 - MSI 行政提取后，使用其实际 Node、Runtime 和内核通过双路径 ready/ping 及完整模拟网关回归；12 个关键文件与源文件/准备资源字节一致，exe 仅相差 Tauri 的 `UNK → MSI` 类型标记。未覆盖本机现有安装或用户数据。
 - [Tao_0.1.4_x64_en-US.msi](../../src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Tao_0.1.4_x64_en-US.msi) 为 74.9 MiB（78,549,592 字节），SHA-256 `a7fba0b0fb18caeb6da36b005feec871113a9e0e6e7b2fdd8338e5a9e8bb0620`。与 0.1.3 使用相同 UpgradeCode、不同 ProductCode。
 - 用户已确认 0.1.4 试用效果正常并授权发布、push。真实模型质量、原生多窗口完整异常路径及干净 Windows 环境继续专项验收；行政提取和模拟网关不代替这些项目。
+- [v0.1.4 Release](https://github.com/1newbird/Tao/releases/tag/v0.1.4) 已正式发布并标记 Latest，源码提交/标签 `69eaa56` / `v0.1.4` 已推送。GitHub 侧两个附件的大小和 SHA-256 均与本地文件一致。
 
 2026-10-12 本机 `0.1.3` 后台窗口修复与打包验证：
 
