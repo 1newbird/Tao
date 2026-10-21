@@ -234,6 +234,7 @@ npm.cmd run tao:release -- 2.1
 - 提取包的完整性、双路径 Runtime ready/ping 和原生主/成员模拟 SDK 回归通过；24 项 Runtime/许可/helper/程序字节核对通过，exe 仅有 Tauri bundle 类型标记变化。
 - 明确卸载使用 MSI 内嵌 helper 移除共享兼容授权，升级保留；原生工具运行期间阻止移除。界面也提供主动移除入口。会话与工作区数据保留。
 - 用户安装试用后反馈“一切正常”，已确认继续提交、push 和发布。UAC 点击取消、明确卸载、重启、Windows 10 与跨用户保留后续专项验收；原生后端仍标注预览。详细记录：[0.2.0 发布验收](../验证/2026-10-21-0.2.0发布验收.md)。
+- [v0.2.0 Release](https://github.com/1newbird/Tao/releases/tag/v0.2.0) 已正式发布并标记 Latest；源码提交/标签 `d9a280c` / `v0.2.0` 已推送。MSI 与 SHA-256 文件的 GitHub 摘要均与本地一致。
 
 2026-10-19 本机 `0.1.4` 编译与包资源验收：
 
