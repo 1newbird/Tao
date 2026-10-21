@@ -34,6 +34,10 @@ if (-not (Test-Path -LiteralPath $tauriCli)) {
 
 Push-Location $projectRoot
 try {
+    if ($env:OS -eq 'Windows_NT' -and $TauriArgs.Count -gt 0 -and $TauriArgs[0] -eq 'dev') {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'scripts\build-windows-sandbox.ps1')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
     & $nodeExe $tauriCli @TauriArgs
     exit $LASTEXITCODE
 } finally {

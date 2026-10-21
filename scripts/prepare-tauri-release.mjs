@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, stat, writeFile, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -12,11 +12,11 @@ const piRoot = join(projectRoot, "vendor", "pi");
 const resourceRoot = join(projectRoot, "src-tauri", "resources");
 const cacheRoot = join(projectRoot, ".tao-release-cache");
 
-const nodeVersion = process.env.TAO_NODE_VERSION?.trim() || "22.19.0";
-const nodeArchiveName = `node-v${nodeVersion}-win-x64.zip`;
-const nodeDownloadUrl = `https://nodejs.org/dist/v${nodeVersion}/${nodeArchiveName}`;
-const nodeArchivePath = join(cacheRoot, nodeArchiveName);
-const nodeExtractRoot = join(cacheRoot, `node-v${nodeVersion}-win-x64`);
+const nodeBuildConfiguration = JSON.parse(await readFile(join(projectRoot, "native", "node-runtime", "build-config.json"), "utf8"));
+const nodeVersion = nodeBuildConfiguration.version;
+if (process.env.TAO_NODE_VERSION?.trim() && process.env.TAO_NODE_VERSION.trim() !== nodeVersion) fail("兼容运行时已固定版本；修改 native/node-runtime/build-config.json 并重新验收后才能升级。");
+const nodeArchivePath = join(cacheRoot, "node-native-build", `node-v${nodeVersion}.tar.xz`);
+const nodeExtractRoot = join(cacheRoot, "node-native-build", "runtime");
 const nodeBinaryPath = join(nodeExtractRoot, "node.exe");
 const developmentOnlyNodeModules = new Set([
   "@biomejs", "@rolldown", "@types", "@typescript",
@@ -30,10 +30,6 @@ function log(message) {
 
 function fail(message) {
   throw new Error(`[Tao 发布准备] ${message}`);
-}
-
-function powershellQuote(value) {
-  return `'${String(value).replaceAll("'", "''")}'`;
 }
 
 async function ensureFile(path, description) {
@@ -51,60 +47,6 @@ async function copyTree(source, target, options = {}) {
     dereference: true,
     ...options,
   });
-}
-
-async function downloadNodeArchive() {
-  await mkdir(cacheRoot, { recursive: true });
-  if (await fileExists(nodeArchivePath)) {
-    log(`复用已缓存的 Node ${nodeVersion} 压缩包`);
-    return;
-  }
-
-  log(`下载 Node ${nodeVersion} Windows x64 运行时`);
-  const response = await fetch(nodeDownloadUrl);
-  if (!response.ok || !response.body) {
-    fail(`无法下载 Node：HTTP ${response.status} ${response.statusText}`);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await writeFile(nodeArchivePath, buffer);
-
-  const sumsUrl = `https://nodejs.org/dist/v${nodeVersion}/SHASUMS256.txt`;
-  const sumsResponse = await fetch(sumsUrl);
-  if (!sumsResponse.ok) {
-    fail(`无法下载 Node 校验文件：HTTP ${sumsResponse.status}`);
-  }
-  const sums = await sumsResponse.text();
-  const expected = sums
-    .split(/\r?\n/)
-    .map((line) => line.trim().split(/\s+/))
-    .find(([hash, name]) => name === nodeArchiveName)?.[0];
-  if (!expected) {
-    fail(`Node 校验文件中没有找到 ${nodeArchiveName}`);
-  }
-  const actual = createHash("sha256").update(buffer).digest("hex");
-  if (actual.toLowerCase() !== expected.toLowerCase()) {
-    fail(`Node 压缩包校验失败，期望 ${expected}，实际 ${actual}`);
-  }
-  log("Node 压缩包校验通过");
-}
-
-async function extractNode() {
-  if (await fileExists(nodeBinaryPath)) {
-    return;
-  }
-
-  log("解压 Node 运行时");
-  await rm(nodeExtractRoot, { recursive: true, force: true });
-  await mkdir(cacheRoot, { recursive: true });
-  await execFileAsync("powershell.exe", [
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    `Expand-Archive -LiteralPath ${powershellQuote(nodeArchivePath)} -DestinationPath ${powershellQuote(cacheRoot)} -Force`,
-  ]);
-  await ensureFile(nodeBinaryPath, "Node 可执行文件");
 }
 
 async function fileExists(path) {
@@ -171,16 +113,20 @@ async function prepareResources() {
     }
   }
 
-  await copyTree(nodeBinaryPath, join(resourceRoot, "node", "node.exe"));
+  await copyTree(nodeExtractRoot, join(resourceRoot, "node"));
+  await execFileAsync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",join(projectRoot,"scripts","build-windows-sandbox.ps1"),"-Release"],{cwd:projectRoot,windowsHide:true,timeout:120000});
+  const nativeSandbox = { file:"native/tao-windows-sandbox.exe", sha256:createHash("sha256").update(await readFile(join(resourceRoot,"native","tao-windows-sandbox.exe"))).digest("hex"), stage:"preview" };
   const licenses = await copyReleaseLicenses({ projectRoot, nodeExtractRoot, resourceRoot });
   await writeFile(
     join(resourceRoot, "RELEASE-MANIFEST.json"),
     `${JSON.stringify({
       platform: "windows-x64",
       nodeVersion,
+      nodeBuild: JSON.parse(await readFile(join(nodeExtractRoot, "BUILD-MANIFEST.json"), "utf8")),
       piSource: "vendor/pi",
       taoLicense: "PolyForm-Noncommercial-1.0.0",
       licenses,
+      nativeSandbox,
       generatedAt: new Date().toISOString(),
     }, null, 2)}\n`,
     "utf8",
@@ -192,17 +138,18 @@ async function main() {
   if (process.platform !== "win32" || process.arch !== "x64") {
     fail("当前发布准备脚本只支持 Windows x64。");
   }
-  if (process.env.CI && process.env.TAO_RELEASE_ALLOW_NETWORK !== "1" && !(await fileExists(nodeArchivePath))) {
-    fail("CI 环境禁止隐式下载 Node，请预先缓存 Node 或设置 TAO_RELEASE_ALLOW_NETWORK=1。");
+  if (process.env.CI && process.env.TAO_RELEASE_ALLOW_NETWORK !== "1" && !(await fileExists(nodeArchivePath)) && !(await fileExists(join(nodeExtractRoot, "BUILD-MANIFEST.json")))) {
+    fail("CI 环境禁止隐式下载 Node，请预先缓存已校验的源码/运行时，或设置 TAO_RELEASE_ALLOW_NETWORK=1。");
   }
 
   log(`项目目录：${projectRoot}`);
   log(`Pi 目录：${piRoot}`);
-  await downloadNodeArchive();
-  await extractNode();
+  log(`准备 Node ${nodeVersion} 与 AppContainer 上游修复（首次需要 C++ 编译环境）`);
+  await execFileAsync(process.execPath, [join(projectRoot, "scripts", "build-sandbox-node.mjs"), ...(process.env.CI && process.env.TAO_RELEASE_ALLOW_NETWORK !== "1" ? ["--offline"] : [])], { cwd: projectRoot, windowsHide: true, timeout: 7200000 });
+  await ensureFile(nodeBinaryPath, "兼容 Node 可执行文件");
   await prepareResources();
   log("发布资源准备完成");
-  log("Tauri 接下来会执行 npm run build 并生成 Windows x64 安装包");
+  log("本命令仅准备资源；安装包需另行运行 tao:release 或 tauri build");
 }
 
 await main();

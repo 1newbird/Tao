@@ -18,6 +18,7 @@ src-tauri/resources/*
 .multi-agent-test-*/
 .runtime-tool-flow-*/
 .context-test-*/
+.execution-test-*/
 .ui-render-test-*/
 .tao-ui-qa/
 

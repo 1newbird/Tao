@@ -140,6 +140,59 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub agent_snapshot: Option<AgentSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_runs: Vec<PromptRun>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptRunState {
+    Starting,
+    Running,
+    Cancelling,
+    SaveFailed,
+    Completed,
+    Stopped,
+    Failed,
+    Interrupted,
+}
+
+impl PromptRunState {
+    pub fn blocks_submission(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Cancelling | Self::SaveFailed)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptRun {
+    pub request_id: String,
+    pub conversation_id: String,
+    pub fingerprint: String,
+    pub sequence: u64,
+    pub version: u64,
+    pub state: PromptRunState,
+    pub started_at: u64,
+    pub updated_at: u64,
+    pub finished_at: Option<u64>,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_configuration: Option<RetryConfiguration>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptRunUpdate {
+    pub run: PromptRun,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<Conversation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptStartReceipt {
+    pub update: Option<PromptRunUpdate>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +260,8 @@ pub struct RuntimeConfiguration {
     pub tool_permissions: BTreeMap<String, ToolPermissionConfiguration>,
     #[serde(default)]
     pub delegation: DelegationConfiguration,
+    pub execution: ExecutionConfiguration,
+    pub compaction: CompactionConfiguration,
 }
 
 impl Default for RuntimeConfiguration {
@@ -223,8 +278,37 @@ impl Default for RuntimeConfiguration {
             custom_tools: Vec::new(),
             tool_permissions: BTreeMap::new(),
             delegation: DelegationConfiguration { enabled: true, ..Default::default() },
+            execution: ExecutionConfiguration::default(),
+            compaction: CompactionConfiguration::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ExecutionConfiguration {
+    pub backend: String,
+    pub image: String,
+    pub file_scope: String,
+    pub workspace_access: String,
+    pub network: String,
+    pub allowed_hosts: Vec<String>,
+    pub allowed_env: Vec<String>,
+}
+impl Default for ExecutionConfiguration {
+    fn default() -> Self { Self { backend: "local".into(), image: "node:22-bookworm-slim".into(), file_scope: "any".into(), workspace_access: "read_write".into(), network: "inherit".into(), allowed_hosts: Vec::new(), allowed_env: Vec::new() } }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CompactionConfiguration {
+    pub mode: String,
+    pub reserve_tokens: u32,
+    pub keep_recent_tokens: u32,
+    pub instructions: String,
+}
+impl Default for CompactionConfiguration {
+    fn default() -> Self { Self { mode: "inherit".into(), reserve_tokens: 16384, keep_recent_tokens: 20000, instructions: String::new() } }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -369,6 +453,8 @@ pub struct TestCustomToolRequest {
     pub workspace_path: Option<String>,
     #[serde(default)]
     pub permission_rule: ToolPermissionConfiguration,
+    #[serde(default)]
+    pub execution: ExecutionConfiguration,
 }
 
 #[derive(Debug, Serialize)]
@@ -420,7 +506,7 @@ pub struct ModelInfo {
     pub max_tokens: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
     pub request_id: String,
@@ -439,7 +525,7 @@ pub struct SendMessageRequest {
     pub attachments: Vec<AttachmentReference>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryMessageRequest {
     pub request_id: String,
@@ -460,6 +546,7 @@ pub struct PermissionResponseRequest {
 #[serde(rename_all = "camelCase")]
 pub struct QueueMessageRequest {
     pub conversation_id: String,
+    pub request_id: String,
     pub text: String,
     pub behavior: String,
 }

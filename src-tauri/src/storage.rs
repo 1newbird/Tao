@@ -7,10 +7,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CONVERSATION_MUTATIONS: Mutex<()> = Mutex::new(());
+
+// Short disk transactions only. Never hold this guard during model/tool calls.
+pub(crate) fn conversation_guard() -> Result<MutexGuard<'static, ()>, String> {
+    CONVERSATION_MUTATIONS.lock().map_err(|_| "会话保存状态不可用".to_string())
+}
 
 pub fn now_millis() -> u64 {
     SystemTime::now()
@@ -47,6 +54,7 @@ pub fn conversation_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
 }
 
 pub fn get_app_state(app: &AppHandle) -> Result<AppState, String> {
+    let _guard = conversation_guard()?;
     let settings = load_settings(app)?;
     let agent_catalog = crate::agents::load(app)?;
     let (conversations, storage_warnings) = load_conversations_with_warnings(app)?;
@@ -103,6 +111,28 @@ pub fn save_runtime_configuration(
 pub(crate) fn normalize_runtime_configuration(
     configuration: RuntimeConfiguration,
 ) -> Result<RuntimeConfiguration, String> {
+    let execution = &configuration.execution;
+    if !matches!(execution.backend.as_str(), "local" | "docker" | "windows") || !matches!(execution.file_scope.as_str(), "any" | "workspace")
+        || !matches!(execution.workspace_access.as_str(), "read_write" | "read_only") || !matches!(execution.network.as_str(), "inherit" | "allow" | "deny")
+        || execution.image.is_empty() || execution.image.len() > 200 || !execution.image.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !execution.image.chars().all(|c| c.is_ascii_alphanumeric() || "._/:@-".contains(c))
+        || execution.allowed_hosts.len() > 64 || execution.allowed_env.len() > 64
+        || execution.allowed_hosts.iter().any(|host| host.is_empty() || host.len() > 253
+            || !host.starts_with(|c: char| c.is_ascii_alphanumeric()) || !host.ends_with(|c: char| c.is_ascii_alphanumeric())
+            || !host.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c)))
+        || execution.allowed_env.iter().any(|name| name.is_empty() || name.len() > 80 || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+        return Err("执行策略、域名或凭据变量名单无效".into());
+    }
+    let compaction = &configuration.compaction;
+    if execution.allowed_env.iter().any(|name| {
+        let upper = name.to_ascii_uppercase();
+        ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "LANG", "LC_ALL", "TERM", "NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV", "SHELLOPTS", "TAO_HOME", "TAO_PI_ROOT", "TAO_NODE_PATH", "TAO_TOOL_INPUT_JSON", "TAO_SANDBOX_CHILD", "TAO_SANDBOX_WORKSPACE"].contains(&upper.as_str())
+            || ["LD_", "DYLD_", "DOCKER_", "PI_"].iter().any(|prefix| upper.starts_with(prefix))
+    }) { return Err("凭据变量名单不能覆盖平台或进程保留变量".into()); }
+    if !matches!(compaction.mode.as_str(), "inherit" | "automatic" | "disabled") || !(256..=131072).contains(&compaction.reserve_tokens)
+        || !(512..=131072).contains(&compaction.keep_recent_tokens) || compaction.instructions.len() > 16000 {
+        return Err("上下文压缩策略无效".into());
+    }
     let delegation = &configuration.delegation;
     if !(1..=4).contains(&delegation.max_concurrent) || !(1..=32).contains(&delegation.max_tasks)
         || !(1000..=1_200_000).contains(&delegation.timeout_ms) || !(1..=100).contains(&delegation.max_turns)
@@ -232,6 +262,8 @@ pub(crate) fn normalize_runtime_configuration(
         custom_tools,
         tool_permissions,
         delegation: configuration.delegation,
+        execution: configuration.execution,
+        compaction: configuration.compaction,
     })
 }
 
@@ -244,6 +276,7 @@ pub fn create_conversation_with_workspace(
     workspace_path: Option<&str>,
     workspace_name: Option<&str>,
 ) -> Result<Conversation, String> {
+    let _guard = conversation_guard()?;
     let settings = load_settings(app)?;
     let mut conversation = new_conversation(
         &settings.provider,
@@ -280,10 +313,19 @@ pub fn new_conversation(provider: &str, model: &str, thinking_level: &str) -> Co
         workspace_name: String::new(),
         messages: Vec::new(),
         agent_snapshot: None,
+        prompt_runs: Vec::new(),
     }
 }
 
 pub fn load_conversation_if_exists(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Option<Conversation>, String> {
+    let _guard = conversation_guard()?;
+    load_conversation_unlocked(app, id)
+}
+
+pub(crate) fn load_conversation_unlocked(
     app: &AppHandle,
     id: &str,
 ) -> Result<Option<Conversation>, String> {
@@ -297,7 +339,10 @@ pub fn load_conversation_if_exists(
     Ok(Some(conversation))
 }
 
-pub fn delete_conversation(app: &AppHandle, id: &str) -> Result<(), String> {
+pub(crate) fn delete_conversation_unlocked(app: &AppHandle, id: &str) -> Result<(), String> {
+    if let Some(conversation) = load_conversation_unlocked(app, id)? {
+        ensure_conversation_idle(&conversation)?;
+    }
     validate_id(id)?;
     let root = app_data_root(app)?;
     let conversation_root = root.join("conversations").join(id);
@@ -326,12 +371,20 @@ pub fn write_conversation(app: &AppHandle, conversation: &Conversation) -> Resul
     write_json(&path, conversation, "对话")
 }
 
+pub(crate) fn ensure_conversation_idle(conversation: &Conversation) -> Result<(), String> {
+    if conversation.prompt_runs.last().is_some_and(|run| run.state.blocks_submission()) {
+        return Err("会话仍有任务或未保存结果，请先停止任务或重试保存".to_string());
+    }
+    Ok(())
+}
+
 pub fn set_conversation_pinned(
     app: &AppHandle,
     id: &str,
     pinned: bool,
 ) -> Result<Conversation, String> {
-    let mut conversation = load_conversation_if_exists(app, id)?
+    let _guard = conversation_guard()?;
+    let mut conversation = load_conversation_unlocked(app, id)?
         .ok_or_else(|| "空白草稿不需要置顶".to_string())?;
     conversation.pinned = pinned;
     write_conversation(app, &conversation)?;
@@ -343,8 +396,9 @@ pub fn set_conversation_workspace(
     id: &str,
     workspace_path: &str,
 ) -> Result<Conversation, String> {
+    let _guard = conversation_guard()?;
     validate_id(id)?;
-    let mut conversation = match load_conversation_if_exists(app, id)? {
+    let mut conversation = match load_conversation_unlocked(app, id)? {
         Some(conversation) => conversation,
         None => {
             let settings = load_settings(app)?;
@@ -357,6 +411,7 @@ pub fn set_conversation_workspace(
             conversation
         }
     };
+    ensure_conversation_idle(&conversation)?;
     conversation.workspace_path = normalize_workspace_path(workspace_path)?;
     if conversation.workspace_path.is_empty() {
         conversation.workspace_name.clear();
@@ -373,6 +428,7 @@ pub fn set_conversation_model(
     model: &str,
     thinking_level: &str,
 ) -> Result<Conversation, String> {
+    let _guard = conversation_guard()?;
     validate_id(id)?;
     let provider = provider.trim();
     let model = model.trim();
@@ -383,8 +439,9 @@ pub fn set_conversation_model(
     if !valid_thinking_level(thinking_level) {
         return Err("invalid thinking level".to_string());
     }
-    let mut conversation = load_conversation_if_exists(app, id)?
+    let mut conversation = load_conversation_unlocked(app, id)?
         .ok_or_else(|| "conversation not found".to_string())?;
+    ensure_conversation_idle(&conversation)?;
     conversation.provider = provider.to_string();
     conversation.model = model.to_string();
     conversation.thinking_level = thinking_level.to_string();
@@ -398,12 +455,13 @@ pub fn set_conversation_permission_mode(
     id: &str,
     permission_mode: &str,
 ) -> Result<Conversation, String> {
+    let _guard = conversation_guard()?;
     validate_id(id)?;
     let permission_mode = permission_mode.trim();
     if !valid_permission_mode(permission_mode) {
         return Err("invalid permission mode".to_string());
     }
-    let mut conversation = load_conversation_if_exists(app, id)?
+    let mut conversation = load_conversation_unlocked(app, id)?
         .ok_or_else(|| "conversation not found".to_string())?;
     conversation.permission_mode = permission_mode.to_string();
     conversation.updated_at = now_millis();
@@ -416,6 +474,7 @@ pub fn set_conversation_title(
     id: &str,
     title: &str,
 ) -> Result<Conversation, String> {
+    let _guard = conversation_guard()?;
     validate_id(id)?;
     let title = title.trim();
     if title.is_empty() {
@@ -424,7 +483,7 @@ pub fn set_conversation_title(
     if title.chars().count() > 200 {
         return Err("会话名称不能超过 200 个字符".to_string());
     }
-    let mut conversation = load_conversation_if_exists(app, id)?
+    let mut conversation = load_conversation_unlocked(app, id)?
         .ok_or_else(|| "会话不存在".to_string())?;
     conversation.title = title.to_string();
     conversation.updated_at = now_millis();
@@ -437,6 +496,7 @@ pub fn rename_workspace(
     workspace_path: &str,
     workspace_name: &str,
 ) -> Result<Vec<Conversation>, String> {
+    let _guard = conversation_guard()?;
     let canonical = normalize_workspace_path(workspace_path)?;
     if canonical.is_empty() {
         return Err("未选择工作区，无法重命名".to_string());
@@ -751,7 +811,7 @@ fn normalize_permission_timeout_ms(value: u64) -> u64 {
     value.clamp(5_000, 600_000)
 }
 
-fn load_conversations(app: &AppHandle) -> Result<Vec<Conversation>, String> {
+pub(crate) fn load_conversations(app: &AppHandle) -> Result<Vec<Conversation>, String> {
     load_conversations_with_warnings(app).map(|(conversations, _)| conversations)
 }
 
@@ -797,6 +857,9 @@ fn reconcile_conversation_from_session(
     app: &AppHandle,
     conversation: &mut Conversation,
 ) -> Result<(), String> {
+    // Managed runs commit messages and the terminal record atomically. Importing
+    // an in-flight SDK transcript here would duplicate or expose partial turns.
+    if !conversation.prompt_runs.is_empty() { return Ok(()); }
     let session_path = app_data_root(app)?
         .join("sessions")
         .join(format!("{}.jsonl", conversation.id));

@@ -32,6 +32,50 @@ pub struct TaoRuntimeStatus {
 pub struct TaoRuntimeManager {
     process: Mutex<Option<Arc<TaoRuntimeProcess>>>,
     startup_error: Mutex<Option<String>>,
+    closing: AtomicBool,
+}
+
+type BackgroundReply = Box<dyn FnOnce(Result<Value, String>) + Send>;
+
+enum PendingRequest {
+    Waiting(Sender<Result<Value, String>>),
+    Background(BackgroundReply),
+}
+
+impl PendingRequest {
+    fn resolve(self, result: Result<Value, String>) {
+        match self {
+            Self::Waiting(sender) => { let _ = sender.send(result); }
+            // Disk finalization must not block the Runtime's stdout reader.
+            Self::Background(callback) => { thread::spawn(move || callback(result)); }
+        }
+    }
+}
+
+pub struct RuntimeDispatch(Arc<TaoRuntimeProcess>);
+
+impl RuntimeDispatch {
+    pub fn send(self, mut command: Value, callback: BackgroundReply) -> Result<(), String> {
+        if !self.0.ready.load(Ordering::SeqCst) || !self.0.is_running()? {
+            return Err("Tao Runtime 在派发前已断开".to_string());
+        }
+        let id = storage::new_id("runtime");
+        command.as_object_mut().ok_or("Runtime 命令格式无效")?
+            .insert("id".to_string(), Value::String(id.clone()));
+        self.0.pending.lock().map_err(|_| "Tao Runtime 请求队列不可用")?
+            .insert(id.clone(), PendingRequest::Background(callback));
+        // EOF can race the readiness check above. Do not insert a request
+        // after the reader has drained its pending callbacks.
+        if !self.0.ready.load(Ordering::SeqCst) {
+            if let Ok(mut pending) = self.0.pending.lock() { pending.remove(&id); }
+            return Err("Tao Runtime 在登记请求时已断开".into());
+        }
+        if let Err(error) = self.0.send_command(&command) {
+            if let Ok(mut pending) = self.0.pending.lock() { pending.remove(&id); }
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 impl Default for TaoRuntimeManager {
@@ -39,6 +83,7 @@ impl Default for TaoRuntimeManager {
         Self {
             process: Mutex::new(None),
             startup_error: Mutex::new(None),
+            closing: AtomicBool::new(false),
         }
     }
 }
@@ -46,7 +91,7 @@ impl Default for TaoRuntimeManager {
 struct TaoRuntimeProcess {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
-    pending: Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>,
+    pending: Arc<Mutex<HashMap<String, PendingRequest>>>,
     ready: Arc<AtomicBool>,
     session_count: Arc<AtomicUsize>,
     last_error: Arc<Mutex<Option<String>>>,
@@ -72,6 +117,7 @@ impl TaoRuntimeManager {
             .process
             .lock()
             .map_err(|_| "Tao Runtime 状态不可用".to_string())?;
+        if self.closing.load(Ordering::SeqCst) { return Err("Tao 正在退出，不再启动后台".into()); }
         if let Some(process) = slot.as_ref() {
             if process.is_running()? {
                 return Ok(());
@@ -144,7 +190,7 @@ impl TaoRuntimeManager {
             .ok_or_else(|| "无法连接 Tao Runtime 错误输出".to_string())?;
         let pid = child.id();
 
-        let pending: Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>> =
+        let pending: Arc<Mutex<HashMap<String, PendingRequest>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let ready = Arc::new(AtomicBool::new(false));
         let session_count = Arc::new(AtomicUsize::new(0));
@@ -197,7 +243,7 @@ impl TaoRuntimeManager {
                                     .unwrap_or("Tao Runtime 拒绝了请求")
                                     .to_string())
                             };
-                            let _ = sender.send(result);
+                            sender.resolve(result);
                         }
                     }
                     Some("fatal") => {
@@ -283,7 +329,7 @@ impl TaoRuntimeManager {
             .pending
             .lock()
             .map_err(|_| "Runtime 请求队列不可用".to_string())?
-            .insert(id.clone(), sender);
+            .insert(id.clone(), PendingRequest::Waiting(sender));
         if let Err(error) = process.send_command(&command) {
             if let Ok(mut pending) = process.pending.lock() {
                 pending.remove(&id);
@@ -299,6 +345,19 @@ impl TaoRuntimeManager {
                 Err("等待 Tao Runtime 响应超时".to_string())
             }
         }
+    }
+
+    pub fn prepare_dispatch(&self, app: &AppHandle) -> Result<RuntimeDispatch, String> {
+        self.start(app)?;
+        let process = self.process.lock().map_err(|_| "Tao Runtime 状态不可用")?
+            .clone().ok_or("Tao Runtime 尚未启动")?;
+        process.wait_ready(Duration::from_secs(30))?;
+        Ok(RuntimeDispatch(process))
+    }
+
+    pub fn shutdown(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        self.stop();
     }
 
     pub fn status(&self) -> Result<TaoRuntimeStatus, String> {
@@ -508,7 +567,7 @@ fn resolve_node_binary(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn fail_pending(
-    pending: &Arc<Mutex<HashMap<String, Sender<Result<Value, String>>>>>,
+    pending: &Arc<Mutex<HashMap<String, PendingRequest>>>,
     message: &str,
 ) {
     let senders = pending
@@ -516,7 +575,7 @@ fn fail_pending(
         .map(|mut values| values.drain().map(|(_, sender)| sender).collect::<Vec<_>>())
         .unwrap_or_default();
     for sender in senders {
-        let _ = sender.send(Err(message.to_string()));
+        sender.resolve(Err(message.to_string()));
     }
 }
 

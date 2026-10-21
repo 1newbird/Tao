@@ -1,9 +1,11 @@
+import { previewRuns } from "./ui-preview-runs";
 import { emptyConfiguration } from "../src/agent-profiles";
 import type { AgentCatalog, AgentProfile, CustomToolConfiguration } from "../src/agent-profiles";
 import type { TeamView } from "../src/collaboration-types";
 
 const scrollScenario = new URLSearchParams(location.search).get("scenario") === "scroll";
 const collaborationScenario = new URLSearchParams(location.search).get("scenario") === "collaboration";
+const showcaseScenario = new URLSearchParams(location.search).get("scenario") === "showcase";
 const previewReport = `# 多智能体协作测试报告
 
 ## 订单核对
@@ -69,6 +71,12 @@ const contextPreview = (configuration: AgentProfile["configuration"]) => {
 const initialContext = { schemaVersion: 1, policyVersion: "tao-context-v1", conversationId: "preview-chat", requestId: "preview-request", capturedAt: Date.now(), conversationStart: true, profile: { profileId: "default", name: "默认助手", revision: 1 }, model: { provider: "preview", id: "tao-preview", api: "openai-completions" }, environment: { workspacePath: "D:/preview/project", permissionMode: "ask", operatingSystem: "win32（模拟）", shell: "bash 工具使用可用的 Bash", localTime: "2026-10-19 10:00:00 GMT+8", timeZone: "Asia/Shanghai" }, systemPrompt: `${contextBase}\n\n工作过程说明：在关键步骤说明进展。\n\n工作区：D:/preview/project\n权限模式：ask\n提示词不会授予额外权限。`, systemPromptTruncated: false, sources: [{ title: "基础提示词", source: "Tao 内置默认（模拟）" }, { title: "工作说明与附加要求", source: "Tao 内置 + 会话组合 v1" }, { title: "环境与权限", source: "本轮请求开始时的 Runtime 状态" }], tools: contextTools, messages: [{ role: "user", characters: 18 }], messageCount: 1, warnings: ["这是模拟的 SDK 输入快照，用于验证界面。", "不包含消息正文、隐藏推理、请求头或密钥。"] };
 const snapshot = (profile: AgentProfile) => ({ profileId: profile.id, name: profile.name, revision: profile.revision, configuration: { ...profile.configuration, customTools: catalog.tools.filter((item) => profile.customToolIds.includes(item.id)) }, defaultModel: profile.defaultModel });
 let conversations = [{ id: "preview-chat", title: "开始一个新想法", provider: "preview", model: "tao-preview", thinkingLevel: "medium", permissionMode: "ask", workspacePath: "D:/preview/project", workspaceName: "Tao 工作区", pinned: false, createdAt: Date.now(), updatedAt: Date.now(), messages: [] as unknown[], agentSnapshot: { ...snapshot(profiles[0]), revision: 1 } }];
+if (showcaseScenario) {
+  conversations[0].title = "新对话";
+  conversations[0].workspacePath = "";
+  conversations[0].workspaceName = "";
+  conversations[0].agentSnapshot = snapshot(profiles[0]);
+}
 if (scrollScenario) {
   conversations[0].title = "Markdown 与滚动验证";
   conversations[0].messages = Array.from({ length: 8 }, (_, index) => [
@@ -115,6 +123,51 @@ if (collaborationScenario && new URLSearchParams(location.search).get("updates")
     if (count >= 60) { clearInterval(timer); output.status = "completed"; previewTeam.tasks[0].state = "submitted"; previewTeam.tasks[0].version++; previewTeam.agents[0].state = "idle"; previewTeam.attempts[0].state = "submitted"; previewTeam.attempts[0].result = output.text; }
   }, 500);
 }
+
+function executePreviewPrompt(args: any) {
+      const conversation = conversations.find((item) => item.id === args.request.conversationId)!;
+      if (scrollScenario) {
+        return new Promise((resolve) => {
+          let index = 0; let output = "";
+          const traces: unknown[] = [];
+          const timer = window.setInterval(() => {
+            index++;
+            const delta = index === 1 ? "# 流式回答\n\n| 批次 | 结果 |\n| --- | --- |\n" : index <= 20 ? `| ${index - 1} | 核对完成，金额 720 |\n` : `\n\n### 追加段落 ${index}\n\n${"流式内容持续生成，向上滚动应保持阅读位置。".repeat(4)}`;
+            output += delta;
+            if (index === 1) {
+              emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_end", activityId: `${args.request.requestId}-text-1:0`, action: "commentary", activityState: "completed", text: "我先核对 **订单和规则**，再整理结论。\n\n- 读取 `orders.csv`\n- 交叉验证有效金额" });
+              emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "tool", event: "started", tool: "read", text: "正在读取 orders.csv" });
+            }
+            if (index === 3) emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "tool", event: "ended", tool: "read", text: "读取已完成" });
+            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_delta", activityId: `${args.request.requestId}-text-2:0`, action: "answer", activityState: "active", text: delta });
+            const trace = { ...previewTrace(index), id: `live-trace-${index}`, title: `流式记录 ${index}` };
+            traces.push(trace);
+            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "trace", event: "updated", traceId: trace.id, traceKind: trace.kind, traceTitle: trace.title, traceStatus: trace.status, traceSummary: trace.summary, traceStartedAt: trace.startedAt, traceMetadata: trace.metadata });
+            if (index >= 120) finishPrompt?.();
+          }, 500);
+          finishPrompt = () => {
+            window.clearInterval(timer);
+            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_end", activityId: `${args.request.requestId}-text-2:0`, action: "answer", activityState: "completed", text: output });
+            conversation.messages.push({ id: crypto.randomUUID(), role: "assistant", content: output, traces, createdAt: Date.now() });
+            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "turn", event: "completed" });
+            resolve(structuredClone(conversation));
+            finishPrompt = undefined;
+          };
+        });
+      }
+      return new Promise((resolve) => {
+        finishPrompt = () => { conversation.messages.push({ id: crypto.randomUUID(), role: "assistant", content: "这是 UI 预览中的模拟回答，未调用模型。", createdAt: Date.now() }); resolve(structuredClone(conversation)); finishPrompt = undefined; };
+        emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "turn", event: "started" });
+      });
+
+}
+
+const promptProtocol = previewRuns({
+  conversations,
+  execute(request) { const result = executePreviewPrompt({ request }); const finish = finishPrompt ?? (() => {}); return { result, finish }; },
+  emit(update) { for (const [id, listener] of listeners) if (listener.event === "tao-prompt-run") callbacks.get(listener.handler)?.({ event: "tao-prompt-run", id, payload: update }); },
+});
+
 const environment = window as unknown as { __TAURI_INTERNALS__: unknown; __TAURI_EVENT_PLUGIN_INTERNALS__: unknown };
 environment.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (id: number) => listeners.delete(id) };
 environment.__TAURI_INTERNALS__ = {
@@ -160,6 +213,8 @@ environment.__TAURI_INTERNALS__ = {
     if (command === "get_app_state") return structuredClone({ conversations, settings, agentCatalog: catalog, runtimeConfiguration: profiles[0].configuration, storageWarnings: [], apiKeyConfigured: true, providerAuthConfigured: { preview: true } });
     if (command === "list_models") return [{ provider: "preview", id: "tao-preview", name: "Tao Preview", reasoning: true, api: "openai-completions", contextWindow: 128000 }];
     if (command === "get_runtime_status") return { phase: "ready", running: true, ready: true, pid: 1234, sessionCount: conversations.length, startedAt: Date.now(), nodePath: "内存预览", runtimePath: "内存预览", piPath: "内存预览", lastError: null };
+    if (command === "get_sandbox_status") return { available: true, image: args.image, backend: args.backend || "docker", imageId: "preview-only", error: null };
+    if (command === "initialize_windows_sandbox") return { available: true, backend: "windows", preview: true, error: null };
     if (command === "prepare_session") return null;
     if (command === "list_workspace") return { rootPath: "D:/preview/project", relativePath: "", entries: [{ name: "report.md", relativePath: "report.md", kind: "file", size: previewReport.length }], changes: [], isGitRepo: false };
     if (command === "list_workspace_changes") return { workspacePath: "D:/preview/project", isGitRepository: false, entries: [] };
@@ -171,44 +226,9 @@ environment.__TAURI_INTERNALS__ = {
     if (command === "save_agent_catalog") { catalog = structuredClone(args.catalog); catalog.revision++; catalog.profiles.forEach((profile) => { profile.revision = Math.max(1, profile.revision); }); return structuredClone(catalog); }
     if (command === "set_workspace_agent_default") { catalog.workspaceDefaults = args.profileId ? [{ workspacePath: "d:/preview/project", profileId: args.profileId }] : []; catalog.revision++; return structuredClone(catalog); }
     if (command === "set_conversation_agent") { const conversation = conversations.find((item) => item.id === args.conversationId)!; conversation.agentSnapshot = snapshot(catalog.profiles.find((item) => item.id === args.profileId)!); return structuredClone(conversation); }
-    if (command === "create_conversation" || command === "create_conversation_with_workspace") { const conversation = { ...structuredClone(conversations[0]), id: crypto.randomUUID(), title: "新对话", messages: [], agentSnapshot: snapshot(catalog.profiles.find((profile) => profile.id === catalog.defaultProfileId)!) }; conversations.push(conversation); return structuredClone(conversation); }
+    if (command === "create_conversation" || command === "create_conversation_with_workspace") { const conversation = { ...structuredClone(conversations[0]), id: crypto.randomUUID(), title: "新对话", messages: [], promptRuns: [], agentSnapshot: snapshot(catalog.profiles.find((profile) => profile.id === catalog.defaultProfileId)!) }; conversations.push(conversation); return structuredClone(conversation); }
     if (command === "test_custom_tool") return { output: "模拟测试完成：工具输入有效。预览环境不会执行真实程序或 HTTP 请求。" };
-    if (command === "send_message") {
-      const conversation = conversations.find((item) => item.id === args.request.conversationId)!;
-      if (scrollScenario) {
-        return new Promise((resolve) => {
-          let index = 0; let output = "";
-          const traces: unknown[] = [];
-          const timer = window.setInterval(() => {
-            index++;
-            const delta = index === 1 ? "# 流式回答\n\n| 批次 | 结果 |\n| --- | --- |\n" : index <= 20 ? `| ${index - 1} | 核对完成，金额 720 |\n` : `\n\n### 追加段落 ${index}\n\n${"流式内容持续生成，向上滚动应保持阅读位置。".repeat(4)}`;
-            output += delta;
-            if (index === 1) {
-              emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_end", activityId: `${args.request.requestId}-text-1:0`, action: "commentary", activityState: "completed", text: "我先核对 **订单和规则**，再整理结论。\n\n- 读取 `orders.csv`\n- 交叉验证有效金额" });
-              emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "tool", event: "started", tool: "read", text: "正在读取 orders.csv" });
-            }
-            if (index === 3) emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "tool", event: "ended", tool: "read", text: "读取已完成" });
-            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_delta", activityId: `${args.request.requestId}-text-2:0`, action: "answer", activityState: "active", text: delta });
-            const trace = { ...previewTrace(index), id: `live-trace-${index}`, title: `流式记录 ${index}` };
-            traces.push(trace);
-            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "trace", event: "updated", traceId: trace.id, traceKind: trace.kind, traceTitle: trace.title, traceStatus: trace.status, traceSummary: trace.summary, traceStartedAt: trace.startedAt, traceMetadata: trace.metadata });
-            if (index >= 120) finishPrompt?.();
-          }, 500);
-          finishPrompt = () => {
-            window.clearInterval(timer);
-            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "message", event: "text_block_end", activityId: `${args.request.requestId}-text-2:0`, action: "answer", activityState: "completed", text: output });
-            conversation.messages.push({ id: crypto.randomUUID(), role: "user", content: args.request.content || args.request.message || "开始流式预览", createdAt: Date.now() }, { id: crypto.randomUUID(), role: "assistant", content: output, traces, createdAt: Date.now() });
-            emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "turn", event: "completed" });
-            resolve(structuredClone(conversation));
-            finishPrompt = undefined;
-          };
-        });
-      }
-      return new Promise((resolve) => {
-        finishPrompt = () => { conversation.messages.push({ id: crypto.randomUUID(), role: "user", content: args.request.content || args.request.message || args.request.prompt || args.request.text, createdAt: Date.now() }, { id: crypto.randomUUID(), role: "assistant", content: "这是 UI 预览中的模拟回答，未调用模型。", createdAt: Date.now() }); resolve(structuredClone(conversation)); finishPrompt = undefined; };
-        emit({ conversationId: conversation.id, requestId: args.request.requestId, category: "turn", event: "started" });
-      });
-    }
+    if (["send_message", "retry_message", "list_prompt_runs", "get_prompt_run", "cancel_prompt_run", "retry_save_prompt_run"].includes(command)) return promptProtocol.handle(command, args);
     if (command === "abort_generation") { finishPrompt?.(); return null; }
     if (command === "choose_agent_catalog" || command === "choose_workspace_directory" || command === "choose_message_files" || command.startsWith("plugin:dialog|")) return null;
     throw new Error(`UI 预览未实现命令：${command}`);

@@ -8,6 +8,7 @@ import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import { collaborationDecision } from "./collaboration-fixture.mjs";
 import { taskBoardDecision } from "./task-board-fixture.mjs";
+import { windowsTeamDecision } from "./windows-team-fixture.mjs";
 
 const root = resolve(process.cwd());
 const resourceArgument = process.argv.indexOf("--resource-root");
@@ -89,6 +90,10 @@ async function createGateway() {
     const payload = JSON.parse(body);
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
     const userText = messageText(messages.filter((message) => message.role === "user").at(-1)?.content);
+    const isSummary = !payload.tools?.length && messages.some((message) => messageText(message.content).includes("COMPACTION_SENTINEL"));
+    const isCompactionTest = userText.includes("COMPACT_CONFIG_TEST");
+    const isNativeFlow = userText.includes("WINDOWS_TOOLS_FLOW");
+    const isDockerFlow = userText.includes("DOCKER_TOOLS_FLOW") || isNativeFlow;
     const toolMessages = messages.filter((message) => message.role === "tool");
     const hasToolResult = toolMessages.length > 0;
     const isDirectoryRequest = /目录|list/i.test(userText);
@@ -104,7 +109,7 @@ async function createGateway() {
     const isTeamChild = userText.includes("TAO_CHILD_");
     const isDefaultTeam = userText.includes("TAO_DEFAULT_TEAM");
     const isDocsRequest = userText.includes("TAO_DOC_LOOKUP");
-    const collaboration = taskBoardDecision(messages) ?? collaborationDecision(messages);
+    const collaboration = windowsTeamDecision(messages) ?? taskBoardDecision(messages) ?? collaborationDecision(messages);
     const requestId = `mock-${gatewayRequests.length + 1}`;
     gatewayRequests.push({
       userText,
@@ -134,14 +139,27 @@ async function createGateway() {
           return;
         }
       }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, isTeamChild ? 180 : isSlowRequest || isTimeoutRequest ? 1_200 : 70));
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, isTeamChild || userText.includes("过期停止验证") ? 180 : isSlowRequest || isTimeoutRequest ? 1_200 : 70));
       if (response.destroyed) return;
       response.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache",
         connection: "keep-alive",
       });
-      if (collaboration) {
+      if (isSummary) {
+        writeSse(response, terminalChunk("Tao fixture summary: 已核对历史事实、当前目标和待办；没有扩大权限。", requestId));
+        writeSse(response, terminalChunk("", requestId));
+      } else if (isCompactionTest) {
+        writeSse(response, terminalChunk("压缩配置测试答复。", requestId));
+        writeSse(response, terminalChunk("", requestId));
+        const tokens = userText.includes("trigger") ? userText.includes("disabled") ? 124500 : 100000 : 2000;
+        writeSse(response, { id: requestId, object: "chat.completion.chunk", choices: [], usage: { prompt_tokens: tokens, completion_tokens: 20, total_tokens: tokens + 20 } });
+      } else if (isDockerFlow) {
+        const steps = [["write", { path: "sandbox.txt", content: "before\n" }], ["edit", { path: "sandbox.txt", edits: [{ oldText: "before", newText: "after" }] }], ["read", { path: isNativeFlow ? "sandbox.txt" : "/workspace/sandbox.txt" }], ["ls", { path: "." }], ["grep", { pattern: "after", glob: "sandbox.txt" }], ["find", { pattern: "sandbox.txt" }], ["bash", { command: "node -e \"process.stdout.write(require('fs').readFileSync('sandbox.txt','utf8'))\"" }]];
+        const step = steps[toolMessages.length];
+        if (step) { writeSse(response, toolCallChunk(step[0], JSON.stringify(step[1]), requestId)); writeSse(response, terminalChunk("", requestId, "tool_calls")); }
+        else { writeSse(response, terminalChunk("沙盒工具流程已完成。", requestId)); writeSse(response, terminalChunk("", requestId)); }
+      } else if (collaboration) {
         if (collaboration.name) {
           writeSse(response, toolCallChunk(collaboration.name, JSON.stringify(collaboration.input), requestId));
           writeSse(response, terminalChunk("", requestId, "tool_calls"));
@@ -311,7 +329,7 @@ async function startRuntime() {
       const pending = responses.get(message.id);
       if (pending) {
         responses.delete(message.id);
-        message.success ? pending.resolve(message.data) : pending.reject(new Error(message.error));
+        message.success ? pending.resolve(message.data) : pending.reject(new Error(`${pending.label}: ${message.error}`));
       }
     }
   });
@@ -331,7 +349,7 @@ async function startRuntime() {
   const registerRequest = (command) => {
     const id = `test-${++sequence}`;
     const promise = new Promise((resolveResponse, rejectResponse) => {
-      responses.set(id, { resolve: resolveResponse, reject: rejectResponse });
+      responses.set(id, { resolve: resolveResponse, reject: rejectResponse, label: `${command.type} ${command.requestId ?? command.conversationId ?? id}` });
       setTimeout(() => {
         const pending = responses.get(id);
         if (pending) { responses.delete(id); rejectResponse(new Error(`Runtime 请求超时：${command.type}`)); }
@@ -399,6 +417,53 @@ try {
   assert(alphaRequests.length === 2 && alphaRequests.every((request) => request.systemText.includes("ALPHA_PROFILE_ONLY") && !request.systemText.includes("BETA_PROFILE_ONLY") && !request.systemText.includes("GLOBAL_CHANGE_MUST_NOT_APPLY") && request.tools.join(",") === "read,read_tao_doc"), "Alpha 组合配置未隔离或被全局编辑改变");
   assert(gatewayRequests.some((request) => request.userText.includes("组合测试 Beta") && request.systemText.includes("BETA_PROFILE_ONLY") && request.tools.join(",") === "read_tao_doc"), "Beta 无业务工具组合没有独立生效");
   await rm(join(taoHome, "runtime/profile.json"));
+
+  const compactProfile = { ...profile("compaction test", []), compaction: { mode: "automatic", reserveTokens: 32768, keepRecentTokens: 512, instructions: "COMPACTION_SENTINEL：必须保留实际证据与未完成事项" } };
+  const compactCommand = { ...prompt("compact-custom", "compact-seed", `COMPACT_CONFIG_TEST seed ${"历史事实。".repeat(1500)}`, workspaceA), runtimeConfiguration: compactProfile };
+  await runtime.request(compactCommand);
+  await runtime.request({ ...compactCommand, requestId: "compact-trigger", message: `COMPACT_CONFIG_TEST trigger ${"当前任务。".repeat(1500)}` });
+  assert(runtime.events.some((event) => event.conversationId === "compact-custom" && event.event === "compaction_ended"), "自定义预留空间未触发真实 SDK 自动压缩");
+  assert(gatewayRequests.some((request) => request.tools.length === 0 && `${request.userText}${request.systemText}`.includes("COMPACTION_SENTINEL")), "摘要补充要求未进入实际压缩模型请求");
+  const compactHistory = await readFile(join(taoHome, "sessions", "compact-custom.jsonl"), "utf8");
+  assert(compactHistory.includes('"type":"compaction"') && compactHistory.includes("Tao fixture summary"), "压缩摘要没有落入真实会话记录");
+  const disabledCommand = { ...compactCommand, conversationId: "compact-disabled", requestId: "disabled-seed", runtimeConfiguration: { ...compactProfile, compaction: { ...compactProfile.compaction, mode: "disabled" } } };
+  await runtime.request(disabledCommand);
+  await runtime.request({ ...disabledCommand, requestId: "disabled-trigger", message: `COMPACT_CONFIG_TEST disabled trigger ${"当前任务。".repeat(1500)}` });
+  assert(!runtime.events.some((event) => event.conversationId === "compact-disabled" && event.event === "compaction_started"), "关闭自动压缩后仍调用压缩流程");
+
+  if (process.argv.includes("--docker") || process.argv.includes("--windows")) {
+    const native=process.argv.includes("--windows");
+    const marker=native?"WINDOWS_TOOLS_FLOW":"DOCKER_TOOLS_FLOW";
+    const dockerConfig = { ...profile("Sandbox test", ["read", "write", "edit", "ls", "grep", "find", "bash"]), execution: { backend: native ? "windows" : "docker", network: "deny" } };
+    // Tauri supplies canonical Windows paths with an extended namespace prefix.
+    // Exercise SDK relative read/edit/list paths against that real input shape.
+    const sandboxWorkspace = process.platform === "win32" ? `\\\\?\\${workspaceB}` : workspaceB;
+    const dockerResult = await runtime.request({ ...prompt("docker-tools", "docker-tools-1", marker, sandboxWorkspace), permissionMode: "full_access", runtimeConfiguration: dockerConfig });
+    assert(dockerResult.messages.some((message) => message.content === "沙盒工具流程已完成。"), "沙盒工具的实际 SDK 流程没有完成");
+    const requests = gatewayRequests.filter((request) => request.userText.includes(marker));
+    assert(requests.some((request) => request.toolResultText.includes("after")), `沙盒文件结果没有回到模型：${requests.at(-1)?.toolResultText.slice(0, 12000)}`);
+    assert(requests.every((request) => !/Error:|沙盒不可用|超出工作区|未找到匹配项/.test(request.toolResultText)), `沙盒工具包含执行错误：${requests.at(-1)?.toolResultText}`);
+    assert(await readFile(join(workspaceB, "sandbox.txt"), "utf8") === "after\n", "SDK 沙盒编辑没有保存回当前工作区");
+  }
+
+  if (process.argv.includes("--windows")) {
+    await writeFile(join(workspaceB, "native-team.txt"), "native-team-evidence 720\n");
+    const start = gatewayRequests.length;
+    const configuration = { ...profile("Native parent", ["read", "ls", "bash"]),
+      execution: { backend: "windows", workspaceAccess: "read_only", network: "deny" },
+      delegation: { enabled: true, allowedProfileIds: ["native-worker-a", "native-worker-b"], maxConcurrent: 2, maxTasks: 4, timeoutMs: 120000, maxTurns: 12 } };
+    const profiles = ["a", "b"].map(id => ({ profileId: `native-worker-${id}`, name: `原生 ${id}`, revision: 1, configuration: profile(`Native member ${id}`, ["read", "ls", "bash"]) }));
+    const result = await runtime.request({ ...prompt("native-team", "native-team-1", "WINDOWS_NATIVE_TEAM_ROOT", `\\\\?\\${workspaceB}`), permissionMode: "full_access", runtimeConfiguration: configuration, delegationProfiles: profiles });
+    assert(result.messages.some(message => message.content === "Windows 原生成员文件与管道流程已完成。"), "原生父子代理流程未完成");
+    const files = await readdir(join(taoHome, "teams", "native-team"));
+    const record = JSON.parse(await readFile(join(taoHome, "teams", "native-team", files.find(file => file.endsWith(".json"))), "utf8"));
+    assert(record.agents.length === 2 && record.attempts.every(attempt => attempt.state === "submitted" && attempt.result === "NATIVE_MEMBER_DONE_720"), "原生成员未实际完成任务");
+    assert(record.agents.every(agent => agent.snapshot.configuration.execution.backend === "windows" && agent.snapshot.configuration.execution.workspaceAccess === "read_only"), "原生成员放宽了父代理隔离或只读边界");
+    assert(record.messages.filter(message => message.body === "NATIVE_FILE_READ_720").length === 2, "原生成员未完成双向直接通信");
+    const requests = gatewayRequests.slice(start);
+    assert(requests.filter(request => request.userText.includes("WINDOWS_NATIVE_PATH_CHILD")).some(request => request.toolResultText.includes("native-team-evidence 720")), "原生成员未实际读取相对文件");
+    assert(requests.every(request => !/沙盒路径超出|沙盒文件路径超出|Error:|原生沙盒不可用/.test(request.toolResultText)), "原生成员工具执行存在错误");
+  }
 
   const autoProfile = { ...profile("DEFAULT_ROOT_ROLE", ["read"], [], { read: { mode: "deny", pathScope: "workspace" } }), delegation: { enabled: true, allowedProfileIds: [], maxConcurrent: 2, maxTasks: 4, timeoutMs: 5000, maxTurns: 3 } };
   await runtime.request({ ...prompt("default-plain", "default-plain-1", "组合测试 只需直接回答", workspaceA), runtimeConfiguration: autoProfile });
@@ -626,12 +691,33 @@ try {
   });
   await followUpPrompt;
 
+  const requestsBeforeEarlyStop = gatewayRequests.length;
+  const preparingStop = runtime.request(prompt("conversation-stop-prepare", "request-stop-prepare", "组合测试 准备阶段停止", workspaceA));
+  const preparingStopAck = await runtime.request({ type: "cancel_active", conversationId: "conversation-stop-prepare", requestId: "request-stop-prepare" });
+  const preparingStopResult = await preparingStop;
+  assert(preparingStopAck.cancelled && preparingStopResult.messages.some((message) => message.status === "stopped"), "准备阶段的定向停止没有生效");
+  assert(gatewayRequests.length === requestsBeforeEarlyStop, "准备阶段已停止的任务仍调用了模型");
+
   const stoppedPrompt = runtime.request(prompt("conversation-stop", "request-stop", "这是停止测试", workspaceA))
     .then(() => null)
     .catch((error) => String(error));
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
-  await runtime.request({ type: "abort", conversationId: "conversation-stop" });
+  const wrongStop = await runtime.request({ type: "cancel_active", conversationId: "conversation-stop", requestId: "an-old-request" });
+  assert(wrongStop.cancelled === false, "过期停止请求错误命中了当前任务");
+  await runtime.request({ type: "abort", conversationId: "conversation-stop", requestId: "request-stop" });
   await stoppedPrompt;
+
+  const afterStopped = runtime.request(prompt("conversation-stop", "request-after-stop", "组合测试 过期停止验证", workspaceA));
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
+  const staleStop = await runtime.request({ type: "cancel_active", conversationId: "conversation-stop", requestId: "request-stop" });
+  assert(staleStop.cancelled === false, "上一轮的停止请求影响了下一轮");
+  for (const type of ["steer", "follow_up"]) {
+    const staleQueue = await runtime.request({ type, conversationId: "conversation-stop", requestId: "request-stop", message: "STALE_QUEUE_MUST_NOT_APPEAR" }).then(() => "").catch(String);
+    assert(staleQueue.includes("目标任务已结束"), `${type} 将上一轮的追加投递到了新任务`);
+  }
+  const afterStoppedResult = await afterStopped;
+  assert(afterStoppedResult.messages.some((message) => message.role === "assistant") && !afterStoppedResult.messages.some((message) => message.status === "stopped"), "新一轮被过期停止取消");
+  assert(!gatewayRequests.some((request) => request.userText.includes("STALE_QUEUE_MUST_NOT_APPEAR")), "过期追加污染了模型上下文");
 
   const retryResult = await runtime.request(prompt("conversation-retry", "request-retry", "这是重试测试", workspaceA));
   const timeoutError = await runtime.request(prompt("conversation-timeout", "request-timeout", "这是超时测试", workspaceA))
@@ -778,6 +864,10 @@ try {
     coordinationToolsAutoRegisteredVerified: true,
     defaultWorkerAndLazyTeamVerified: true,
     builtinDocumentationLookupVerified: true,
+    customCompactionThresholdAndInstructionsVerified: true,
+    automaticCompactionDisabledVerified: true,
+    ...(process.argv.includes("--docker") ? { dockerSdkToolFlowVerified: true } : {}),
+    ...(process.argv.includes("--windows") ? { windowsSdkToolFlowVerified: true, windowsMemberToolFlowVerified: true } : {}),
     piContinuedAfterToolResult: true,
   }));
 } finally {

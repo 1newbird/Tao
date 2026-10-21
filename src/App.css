@@ -193,9 +193,13 @@ button {
 .empty-mark {
   display: grid;
   place-items: center;
-  color: #ffffff;
-  background: var(--tao-accent-strong);
-  font-weight: 700;
+}
+
+.brand-mark img,
+.empty-mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-mark {
@@ -1732,9 +1736,9 @@ button {
 }
 
 .empty-mark {
-  width: 42px;
-  height: 42px;
-  margin-bottom: 18px;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 20px;
   border-radius: 13px;
   font-size: 18px;
 }
@@ -1749,7 +1753,8 @@ button {
 .empty-state p {
   margin: 10px 0 0;
   color: #858581;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .composer-area {
@@ -1880,6 +1885,21 @@ button {
   color: #aaa9a4;
   background: #eeeeeb;
   cursor: default;
+}
+
+.notice > button {
+  margin-left: 10px;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.notice > button:focus-visible {
+  outline: 2px solid var(--tao-accent-strong);
+  outline-offset: 2px;
 }
 
 .notice {

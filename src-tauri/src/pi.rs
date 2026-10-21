@@ -13,14 +13,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
-// Long agent turns can finish tools before the final assistant response is
-// ready. Keep this as an outer guard only; Pi still owns provider retries.
-const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-
-struct PiPromptResult {
-    messages: Vec<Message>,
-}
-
 const MAX_MESSAGE_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
 
@@ -301,199 +293,90 @@ pub fn save_global_model_configuration(
     )
 }
 
-pub fn send_message(
-    app: &AppHandle,
-    manager: &TaoRuntimeManager,
-    mut request: SendMessageRequest,
-) -> Result<Conversation, String> {
-    let text = request.text.trim();
+pub(crate) struct PreparedPrompt {
+    pub conversation: Conversation,
+    pub command: Value,
+    pub retry: RetryConfiguration,
+}
+
+pub(crate) fn prepare_message(app: &AppHandle, mut request: SendMessageRequest) -> Result<PreparedPrompt, String> {
+    let text = request.text.trim().to_string();
     let attachments = normalize_attachments(&request.attachments)?;
     request.attachments = attachments.clone();
     let provider = request.provider.trim();
     let model = request.model.trim();
-    if request.request_id.trim().is_empty() {
-        return Err("请求 ID 不能为空".to_string());
-    }
-    if text.is_empty() && attachments.is_empty() {
-        return Err("消息或附件不能为空".to_string());
-    }
-    if provider.is_empty() || model.is_empty() {
-        return Err("请先配置 Provider 和 Model".to_string());
-    }
-    let permission_mode = normalize_permission_mode(&request.permission_mode);
-
-    let mut conversation = storage::load_conversation_if_exists(app, &request.conversation_id)?
-        .unwrap_or_else(|| {
-            let mut conversation =
-                storage::new_conversation(provider, model, &request.thinking_level);
-            conversation.id = request.conversation_id.clone();
-            conversation
-        });
+    if request.request_id.trim().is_empty() { return Err("请求 ID 不能为空".into()); }
+    if text.is_empty() && attachments.is_empty() { return Err("消息或附件不能为空".into()); }
+    if provider.is_empty() || model.is_empty() { return Err("请先配置 Provider 和 Model".into()); }
+    let mut conversation = storage::load_conversation_unlocked(app, &request.conversation_id)?
+        .ok_or("会话已不存在，请重新打开或新建对话")?;
+    storage::ensure_conversation_idle(&conversation)?;
     crate::agents::ensure_snapshot(app, &mut conversation)?;
     let timestamp = storage::now_millis();
     conversation.messages.push(Message {
-        id: storage::new_id("message"),
-        role: "user".to_string(),
-        content: text.to_string(),
-        created_at: timestamp,
-        status: None,
-        retry: None,
-        thinking: None,
-        duration_ms: None,
-        activities: None,
-        traces: None,
+        id: storage::new_id("message"), role: "user".into(), content: text.clone(), created_at: timestamp,
+        status: None, retry: None, thinking: None, duration_ms: None, activities: None, traces: None,
         attachments: (!attachments.is_empty()).then_some(attachments.clone()),
     });
-    conversation.provider = provider.to_string();
-    conversation.model = model.to_string();
-    conversation.thinking_level = request.thinking_level.trim().to_string();
-    conversation.permission_mode = permission_mode.to_string();
+    conversation.provider = provider.into();
+    conversation.model = model.into();
+    conversation.thinking_level = request.thinking_level.trim().into();
+    conversation.permission_mode = normalize_permission_mode(&request.permission_mode).into();
     conversation.updated_at = timestamp;
     if conversation.title == "新对话" {
-        conversation.title = if text.is_empty() {
-            format!("附件：{}", attachments[0].name)
-        } else {
-            text.chars().take(24).collect()
-        };
+        conversation.title = if text.is_empty() { format!("附件：{}", attachments[0].name) } else { text.chars().take(24).collect() };
     }
-    storage::write_conversation(app, &conversation)?;
-
-    match run_pi_rpc(app, manager, &conversation, text, &request) {
-        Ok(result) => conversation.messages.extend(result.messages),
-        Err(error) => {
-            conversation.messages.push(Message {
-                id: storage::new_id("message"),
-                role: "error".to_string(),
-                content: error.clone(),
-                created_at: storage::now_millis(),
-                status: None,
-                retry: Some(RetryConfiguration {
-                    provider: request.provider.trim().to_string(),
-                    model: request.model.trim().to_string(),
-                    base_url: request.base_url.trim().to_string(),
-                    api: request.api.trim().to_string(),
-                    thinking_level: request.thinking_level.trim().to_string(),
-                    agent_snapshot: conversation.agent_snapshot.clone(),
-                }),
-                thinking: None,
-                duration_ms: None,
-                activities: None,
-                traces: None,
-                attachments: None,
-            });
-            conversation.updated_at = storage::now_millis();
-            storage::write_conversation(app, &conversation)?;
-            return Err(error);
-        }
-    }
-
-    conversation.updated_at = storage::now_millis();
-    storage::write_conversation(app, &conversation)?;
-    Ok(conversation)
+    prepared_prompt(app, conversation, &text, &request)
 }
 
-pub fn retry_message(
-    app: &AppHandle,
-    manager: &TaoRuntimeManager,
-    request: RetryMessageRequest,
-) -> Result<Conversation, String> {
-    if request.request_id.trim().is_empty() {
-        return Err("请求 ID 不能为空".to_string());
+pub(crate) fn prepare_retry(app: &AppHandle, request: RetryMessageRequest) -> Result<PreparedPrompt, String> {
+    let mut conversation = storage::load_conversation_unlocked(app, &request.conversation_id)?.ok_or("找不到需要重试的对话")?;
+    storage::ensure_conversation_idle(&conversation)?;
+    let index = conversation.messages.iter().position(|message| message.id == request.error_message_id && message.role == "error")
+        .ok_or("找不到需要重试的失败消息")?;
+    if conversation.messages[index + 1..].iter().any(|message| matches!(message.role.as_str(), "user" | "assistant")) {
+        return Err("只可重试最近失败的请求；较早问题请重新发送".into());
     }
-    if request.conversation_id.trim().is_empty() || request.error_message_id.trim().is_empty() {
-        return Err("重试参数不完整".to_string());
-    }
-
-    let mut conversation = storage::load_conversation_if_exists(app, &request.conversation_id)?
-        .ok_or_else(|| "找不到需要重试的对话".to_string())?;
-    let error_index = conversation
-        .messages
-        .iter()
-        .position(|message| message.id == request.error_message_id && message.role == "error")
-        .ok_or_else(|| "找不到需要重试的失败消息".to_string())?;
-    let retry = conversation.messages[error_index]
-        .retry
-        .clone()
-        .ok_or_else(|| "这条失败消息没有可重试配置".to_string())?;
-    let user_message = conversation.messages[..error_index]
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .cloned()
-        .ok_or_else(|| "找不到这次请求对应的用户消息".to_string())?;
-    let text = user_message.content.trim().to_string();
-    let attachments = user_message.attachments.clone().unwrap_or_default();
-    if text.is_empty() && attachments.is_empty() {
-        return Err("原始用户消息和附件都为空，无法重试".to_string());
-    }
-
-    conversation.messages.remove(error_index);
+    let retry = conversation.messages[index].retry.clone().ok_or("这条失败消息没有可重试配置")?;
+    let user_message = conversation.messages[..index].iter().rev().find(|message| message.role == "user").cloned().ok_or("找不到原始用户消息")?;
+    conversation.messages.remove(index);
     conversation.provider = retry.provider.clone();
     conversation.model = retry.model.clone();
     conversation.thinking_level = retry.thinking_level.clone();
     if retry.agent_snapshot.is_some() { conversation.agent_snapshot = retry.agent_snapshot.clone(); }
-    conversation.updated_at = storage::now_millis();
-    storage::write_conversation(app, &conversation)?;
-
-    let prompt_request = SendMessageRequest {
-        request_id: request.request_id,
-        conversation_id: request.conversation_id,
-        text,
-        provider: retry.provider,
-        model: retry.model,
-        base_url: retry.base_url,
-        api: retry.api,
-        thinking_level: retry.thinking_level,
-        permission_mode: conversation.permission_mode.clone(),
-        permission_timeout_ms: storage::load_settings(app)?.permission_timeout_ms,
-        attachments,
+    let text = user_message.content.trim().to_string();
+    let prompt = SendMessageRequest {
+        request_id: request.request_id, conversation_id: request.conversation_id, text: text.clone(),
+        provider: retry.provider, model: retry.model, base_url: retry.base_url, api: retry.api, thinking_level: retry.thinking_level,
+        permission_mode: conversation.permission_mode.clone(), permission_timeout_ms: storage::load_settings(app)?.permission_timeout_ms,
+        attachments: user_message.attachments.unwrap_or_default(),
     };
+    if text.is_empty() && prompt.attachments.is_empty() { return Err("原始消息和附件为空，无法重试".into()); }
+    prepared_prompt(app, conversation, &text, &prompt)
+}
 
-    if let Err(error) = manager.request(
-        app,
-        serde_json::json!({
-            "type": "cancel_active",
-            "conversationId": conversation.id,
-        }),
-        Duration::from_secs(30),
-    ) {
-        if !error.contains("没有正在生成") && !error.contains("尚未创建") {
-            return Err(format!("无法清理上一次失败的运行状态：{error}"));
-        }
-    }
+fn prepared_prompt(app: &AppHandle, conversation: Conversation, text: &str, request: &SendMessageRequest) -> Result<PreparedPrompt, String> {
+    let command = serde_json::json!({
+        "type": "prompt", "conversationStart": conversation.messages.len() <= 1,
+        "conversationId": conversation.id, "requestId": request.request_id, "message": text,
+        "provider": request.provider, "model": request.model, "baseUrl": request.base_url, "api": request.api,
+        "thinkingLevel": request.thinking_level, "permissionMode": conversation.permission_mode,
+        "permissionTimeoutMs": request.permission_timeout_ms, "workspacePath": conversation.workspace_path,
+        "runtimeConfiguration": conversation.agent_snapshot.as_ref().map(|snapshot| &snapshot.configuration),
+        "agentInfo": conversation.agent_snapshot.as_ref().map(|snapshot| serde_json::json!({ "profileId": snapshot.profile_id, "name": snapshot.name, "revision": snapshot.revision })),
+        "delegationProfiles": crate::agents::delegation_snapshots(app, conversation.agent_snapshot.as_ref())?,
+        "attachments": request.attachments,
+    });
+    let retry = RetryConfiguration {
+        provider: request.provider.trim().into(), model: request.model.trim().into(), base_url: request.base_url.trim().into(),
+        api: request.api.trim().into(), thinking_level: request.thinking_level.trim().into(), agent_snapshot: conversation.agent_snapshot.clone(),
+    };
+    Ok(PreparedPrompt { conversation, command, retry })
+}
 
-    match run_pi_rpc(app, manager, &conversation, &prompt_request.text, &prompt_request) {
-        Ok(result) => conversation.messages.extend(result.messages),
-        Err(error) => {
-            conversation.messages.push(Message {
-                id: storage::new_id("message"),
-                role: "error".to_string(),
-                content: error.clone(),
-                created_at: storage::now_millis(),
-                status: None,
-                retry: Some(RetryConfiguration {
-                    provider: prompt_request.provider.trim().to_string(),
-                    model: prompt_request.model.trim().to_string(),
-                    base_url: prompt_request.base_url.trim().to_string(),
-                    api: prompt_request.api.trim().to_string(),
-                    thinking_level: prompt_request.thinking_level.trim().to_string(),
-                    agent_snapshot: conversation.agent_snapshot.clone(),
-                }),
-                thinking: None,
-                duration_ms: None,
-                activities: None,
-                traces: None,
-                attachments: None,
-            });
-            conversation.updated_at = storage::now_millis();
-            storage::write_conversation(app, &conversation)?;
-            return Err(error);
-        }
-    }
-
-    conversation.updated_at = storage::now_millis();
-    storage::write_conversation(app, &conversation)?;
-    Ok(conversation)
+pub(crate) fn error_message(content: String, retry: Option<RetryConfiguration>) -> Message {
+    Message { id: storage::new_id("message"), role: "error".into(), content, created_at: storage::now_millis(), status: None,
+        retry, thinking: None, duration_ms: None, activities: None, traces: None, attachments: None }
 }
 
 pub fn prepare_session(
@@ -551,49 +434,7 @@ pub fn prepare_session(
     Ok(())
 }
 
-fn run_pi_rpc(
-    app: &AppHandle,
-    manager: &TaoRuntimeManager,
-    conversation: &Conversation,
-    text: &str,
-    request: &SendMessageRequest,
-) -> Result<PiPromptResult, String> {
-    let response = manager.request(
-        app,
-        serde_json::json!({
-            "type": "prompt",
-            "conversationStart": conversation.messages.len() <= 1,
-            "conversationId": conversation.id,
-            "requestId": request.request_id,
-            "message": text,
-            "provider": request.provider,
-            "model": request.model,
-            "baseUrl": request.base_url,
-            "api": request.api,
-            "thinkingLevel": request.thinking_level,
-            "permissionMode": conversation.permission_mode.clone(),
-            "permissionTimeoutMs": request.permission_timeout_ms,
-            "workspacePath": conversation.workspace_path,
-            "runtimeConfiguration": conversation.agent_snapshot.as_ref().map(|snapshot| &snapshot.configuration),
-            "agentInfo": conversation.agent_snapshot.as_ref().map(|snapshot| serde_json::json!({ "profileId": snapshot.profile_id, "name": snapshot.name, "revision": snapshot.revision })),
-            "delegationProfiles": crate::agents::delegation_snapshots(app, conversation.agent_snapshot.as_ref())?,
-            "attachments": request.attachments,
-        }),
-        RPC_RESPONSE_TIMEOUT,
-    )
-    .map_err(|error| {
-        if error.contains("等待 Tao Runtime 响应超时") {
-            let cancelled = manager.request(app, serde_json::json!({ "type": "cancel_active", "conversationId": conversation.id }), Duration::from_secs(10));
-            if cancelled.is_err() {
-                manager.stop();
-                "请求超时且后台未确认取消，已停止 Runtime。请检查已有操作结果后重新连接。".to_string()
-            } else {
-                "请求超时（30 分钟），后台任务已取消。已有工具操作不会回滚，请检查结果后决定是否重试。".to_string()
-            }
-        } else {
-            error
-        }
-    })?;
+pub(crate) fn parse_prompt_messages(response: &Value) -> Result<Vec<Message>, String> {
     let values = response
         .get("messages")
         .and_then(Value::as_array)
@@ -636,7 +477,7 @@ fn run_pi_rpc(
     if !messages.iter().any(|message| message.role == "assistant") {
         return Err("Tao Runtime 没有返回回答".to_string());
     }
-    Ok(PiPromptResult { messages })
+    Ok(messages)
 }
 
 fn normalize_permission_mode(mode: &str) -> &str {

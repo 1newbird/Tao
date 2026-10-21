@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { executionConfiguration } from "./execution-policy.mjs";
 
 export function canonicalTarget(path) {
   let ancestor = resolve(path);
@@ -21,11 +22,18 @@ export function inWorkspace(cwd, path) {
 }
 
 export function applyToolPolicy(cwd, name, input, audit, profile) {
+  const execution = executionConfiguration(profile?.execution);
+  const deny = (reason) => ({ ...audit, decision: "deny", enforcedDeny: true, reason });
+  if (execution.workspaceAccess === "read_only" && ["write", "edit"].includes(name)) return deny("此组合的工作区为只读");
+  const customTool = profile?.customTools?.find((tool) => tool.name === name);
+  if (customTool?.kind === "http" && execution.network === "deny") return deny("此组合禁止工具联网");
+  if ((name === "bash" || (customTool && customTool.kind !== "http")) && execution.backend === "local"
+    && (execution.fileScope === "workspace" || execution.workspaceAccess === "read_only" || execution.network === "deny" || execution.allowedHosts.length)) return deny("本机进程无法强制这些执行边界，请使用 Windows 原生或 Docker 沙盒");
   const rule = profile?.toolPermissions?.[name];
   if (audit.decision === "deny" || rule?.mode === "deny") {
     return { ...audit, decision: "deny", enforcedDeny: true, reason: rule?.mode === "deny" ? "此组合禁止使用该工具。" : audit.reason };
   }
-  if (rule?.pathScope === "workspace" && ["read", "write", "edit", "grep", "find", "ls"].includes(name)) {
+  if ((rule?.pathScope === "workspace" || execution.fileScope === "workspace") && ["read", "write", "edit", "grep", "find", "ls"].includes(name)) {
     const raw = input?.path ?? input?.file_path ?? input?.directory ?? input?.dir ?? ".";
     try {
       if (!inWorkspace(cwd, resolve(cwd, String(raw)))) {

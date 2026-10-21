@@ -61,8 +61,8 @@ npm.cmd run tao:release:nsis -- 2.1
 该命令依次执行：
 
 1. 下载或复用 WiX 3.14.1 官方 NuGet 包，校验 SHA-512，放入项目的 `src-tauri/target/.tauri/` 缓存；
-2. 下载或复用 Node.js 22.19.0 Windows x64 压缩包，首次下载时校验官方 SHA-256；
-3. 从空的 `src-tauri/resources` 重新准备 Tao Runtime、Pi 源码、模型数据、运行依赖和 Node，复制根目录 `LICENSE`/`NOTICE`/`THIRD_PARTY_NOTICES.md`、上游 `pi/LICENSE` 和官方运行包 `node/LICENSE`，将声明 SHA-256 写入资源清单；
+2. 校验或构建基于官方 Node.js 22.23.3 源码的私有 Windows x64 运行时，合入 AppContainer 管道兼容补丁；源码归档、补丁及所有发行文件均记录 SHA-256。首次构建需要 Python 和 Visual Studio C++ x64 工具，普通安装用户不需要这些环境；
+3. 从空的 `src-tauri/resources` 重新准备 Tao Runtime、Pi 源码、模型数据、运行依赖、Node/npm 和原生沙盒辅助组件，复制根目录 `LICENSE`/`NOTICE`/`THIRD_PARTY_NOTICES.md`、上游 `pi/LICENSE` 和官方源码 `node/LICENSE`，将声明与组件 SHA-256 写入资源清单；
 4. 校验许可声明及其 SHA-256，使用内置 Node 分别按普通 Windows 路径和 `\\?\` 扩展路径启动发布资源，等待 Runtime 真正输出 `ready` 并确认 `ping` 响应；
 5. 构建前端和 Rust x86_64 Release；
 6. 生成 MSI，并检查 MSI 文件表中 Node、Runtime、Pi 入口、tsx loader、模型数据及上述五份许可声明的安装位置；
@@ -171,7 +171,7 @@ src-tauri\resources\
 
 目标电脑需要：
 
-1. Windows 10/11 x64；内置 Node 22.19.0 的正式支持从 Windows 10 x64 起，当前安装包未在更早系统或 Windows ARM 上验收；
+1. Windows 10/11 x64；源码目标为该范围，当前原生沙盒在 Windows 11 验证，Windows 10 尚待实机验收，未承诺更早系统或 Windows ARM。已发布安装包仍携带其原版本运行时，源码构建变更不自动更新旧包；
 2. Microsoft WebView2 Runtime；当前 MSI 使用 Tauri 默认安装方式，目标电脑缺失时安装程序会联网获取 WebView2 引导程序；
 3. 访问模型网关或 API 的网络；
 4. 用户自己配置 Provider、模型和 API Key。
@@ -226,6 +226,14 @@ npm.cmd run tao:release -- 2.1
 - 发布后用户的会话和设置仍在用户目录，不应由安装包覆盖。
 
 ## 10. 当前发布验收状态
+
+2026-10-21 本机 `0.2.0` 编译与验收：
+
+- 新增组合级执行权限、Docker/Windows 原生预览、压缩策略及长任务持久化；Windows 原生使用随包兼容 Node，不要求用户安装 Docker、Rust 或开发工具链。
+- MSI **83.9 MiB**（87,973,928 字节），SHA-256 `8e75072de4d7e18f3d6cf97ec175789db1312d074e567329838ff9ce7af0bce7`；21,144 项文件、40 项模型数据，UpgradeCode 与 0.1.4 一致，ProductCode 已更新。
+- 提取包的完整性、双路径 Runtime ready/ping 和原生主/成员模拟 SDK 回归通过；24 项 Runtime/许可/helper/程序字节核对通过，exe 仅有 Tauri bundle 类型标记变化。
+- 明确卸载使用 MSI 内嵌 helper 移除共享兼容授权，升级保留；原生工具运行期间阻止移除。界面也提供主动移除入口。会话与工作区数据保留。
+- 用户安装试用后反馈“一切正常”，已确认继续提交、push 和发布。UAC 点击取消、明确卸载、重启、Windows 10 与跨用户保留后续专项验收；原生后端仍标注预览。详细记录：[0.2.0 发布验收](../验证/2026-10-21-0.2.0发布验收.md)。
 
 2026-10-19 本机 `0.1.4` 编译与包资源验收：
 

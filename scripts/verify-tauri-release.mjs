@@ -1,9 +1,12 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { spawn, execFile } from "node:child_process";
+import { mkdtemp, readdir, rm, stat, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { verifyReleaseLicenses } from "./release-licenses.mjs";
+import { verifyStaticCrt } from "./pe-imports.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const resourceRoot = process.argv[2] === "--resource-root" && process.argv[3]
@@ -133,8 +136,13 @@ async function verifyRuntimeReady(resourcePath) {
 async function main() {
   for (const [path, label] of [
     [nodeExe, "内置 Node"],
+    [join(resourceRoot,"native","tao-windows-sandbox.exe"),"Windows 原生沙盒执行器"],
     [runtimeScript, "Tao Runtime"],
     [join(resourceRoot, "runtime", "policy.mjs"), "Tao 权限模块"],
+    ...["execution", "execution-policy", "execution-tools", "sandbox-worker", "compaction-policy", "windows-sandbox", "sandbox-node"].map((name) => [join(resourceRoot, "runtime", `${name}.mjs`), `Tao ${name}`]),
+    [join(resourceRoot, "node", "BUILD-MANIFEST.json"), "兼容 Node 构建清单"],
+    [join(resourceRoot, "node", "npm.cmd"), "内置 npm"],
+    [join(resourceRoot, "node", "npx.cmd"), "内置 npx"],
     [join(resourceRoot, "runtime", "multi-agent.mjs"), "Tao 多智能体协调器"],
     [join(resourceRoot, "runtime", "context.mjs"), "Tao 上下文模块"],
     [join(resourceRoot, "runtime", "prompt-policy.mjs"), "Tao 提示词策略"],
@@ -148,6 +156,20 @@ async function main() {
   ]) await requireFile(path, label);
 
   const licenseCount = await verifyReleaseLicenses(resourceRoot);
+  const manifest=JSON.parse(await readFile(join(resourceRoot,"RELEASE-MANIFEST.json"),"utf8"));
+  const nodeBuild=JSON.parse(await readFile(join(resourceRoot,"node","BUILD-MANIFEST.json"),"utf8"));
+  if(JSON.stringify(nodeBuild)!==JSON.stringify(manifest.nodeBuild)||manifest.nodeVersion!==nodeBuild.nodeVersion)throw new Error("Node 构建信息与发布清单不一致");
+  const nodeModule=await import(pathToFileURL(join(resourceRoot,"runtime","sandbox-node.mjs")).href);
+  const verifiedNode=await nodeModule.sandboxNodeSource();
+  if(resolve(nodeCompatiblePath(verifiedNode.folder)).toLowerCase()!==resolve(nodeCompatiblePath(join(resourceRoot,"node"))).toLowerCase())throw new Error("Node 验证使用了发布目录之外的资源");
+  log(`兼容 Node ${nodeBuild.nodeVersion}、上游补丁及 ${nodeBuild.files.length} 个资源 SHA-256 通过`);
+  const nativeFile=join(resourceRoot,"native","tao-windows-sandbox.exe");
+  if(manifest.nativeSandbox?.file!=="native/tao-windows-sandbox.exe" || manifest.nativeSandbox?.sha256!==createHash("sha256").update(await readFile(nativeFile)).digest("hex")) throw new Error("原生执行器与发布清单不一致");
+  const nativeImports=verifyStaticCrt(await readFile(nativeFile));
+  verifyStaticCrt(await readFile(nodeExe));
+  const nativeProbe=await promisify(execFile)(nativeFile,["--compat-status"],{windowsHide:true,timeout:5000});
+  if(JSON.parse(nativeProbe.stdout).capability!=="Tao.WindowsSandbox.Compatibility.v1") throw new Error("原生执行器版本不匹配");
+  log(`原生执行器 SHA-256、静态 CRT 与只读探测通过（${nativeImports.length} 项系统 DLL 导入）；此探测不初始化系统权限`);
   log(`${licenseCount} 份许可声明完整，SHA-256 与发布清单一致`);
 
   const modelData = join(piRoot, "packages", "ai", "src", "providers", "data");

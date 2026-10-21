@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="charcoal" cx="48%" cy="38%" r="76%">
+      <stop stop-color="#17191b"/>
+      <stop offset="1" stop-color="#090a0b"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="60" fill="url(#charcoal)"/>
+  <path d="M78 78H158C169 78 176 74 182 67C186 62 192 64 195 69C203 81 196 98 185 103C178 107 171 108 161 108H139C147 115 150 123 150 135V162C150 175 155 182 168 185C178 188 184 187 183 194C181 203 171 207 163 207C135 207 120 186 120 164V135C120 117 115 108 98 108H78C58 108 58 78 78 78Z" fill="#fcf6eb"/>
+</svg>

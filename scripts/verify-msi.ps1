@@ -52,6 +52,11 @@ function Get-DirectoryPath([string]$id) {
 $required = @(
     'tao.exe',
     'node\node.exe',
+    'node\BUILD-MANIFEST.json',
+    'node\npm.cmd',
+    'node\npx.cmd',
+    'node\node_modules\npm\bin\npm-cli.js',
+    'native\tao-windows-sandbox.exe',
     'LICENSE',
     'NOTICE',
     'THIRD_PARTY_NOTICES.md',
@@ -62,6 +67,13 @@ $required = @(
     'runtime\multi-agent.mjs',
     'runtime\context.mjs',
     'runtime\prompt-policy.mjs',
+    'runtime\execution.mjs',
+    'runtime\execution-policy.mjs',
+    'runtime\execution-tools.mjs',
+    'runtime\windows-sandbox.mjs',
+    'runtime\sandbox-node.mjs',
+    'runtime\sandbox-worker.mjs',
+    'runtime\compaction-policy.mjs',
     'runtime\docs\tools.md',
     'runtime\docs\collaboration.md',
     'runtime\docs\permissions.md',
@@ -116,5 +128,43 @@ foreach ($suffix in $required) {
     Write-Host "[Tao MSI] $suffix -> $expectedPath"
 }
 if ($modelFiles -lt 1) { throw 'MSI is missing Pi model data' }
+
+# A file-table check alone cannot prove the uninstall lifecycle was linked.
+$view = $database.OpenView('SELECT `Type`, `Source`, `Target` FROM `CustomAction` WHERE `Action` = ''RemoveTaoSandboxCompatibility''')
+$view.Execute()
+try {
+    $record = $view.Fetch()
+    if (-not $record -or $record.IntegerData(1) -ne 3074 -or $record.StringData(2) -ne 'TaoSandboxRemovalHelper' -or $record.StringData(3) -ne '--compat-cleanup --if-initialized') {
+        throw 'MSI sandbox removal must use its embedded helper, deferred and elevated, with checked return status'
+    }
+} finally { $view.Close() }
+$view = $database.OpenView('SELECT `Condition`, `Sequence` FROM `InstallExecuteSequence` WHERE `Action` = ''RemoveTaoSandboxCompatibility''')
+$view.Execute()
+try {
+    $record = $view.Fetch()
+    if (-not $record -or $record.StringData(1) -ne 'REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE') { throw 'MSI must preserve sandbox grants during upgrades' }
+    $taoCleanupSequence = $record.IntegerData(2)
+} finally { $view.Close() }
+$view = $database.OpenView('SELECT `Sequence` FROM `InstallExecuteSequence` WHERE `Action` = ''RemoveFiles''')
+$view.Execute()
+try {
+    $record = $view.Fetch()
+    if (-not $record -or $taoCleanupSequence -ge $record.IntegerData(1)) { throw 'Sandbox cleanup must run before removing application files' }
+} finally { $view.Close() }
+Write-Host '[Tao MSI] Verified embedded sandbox cleanup and upgrade-preserving condition'
+$view = $database.OpenView('SELECT `Data` FROM `Binary` WHERE `Name` = ''TaoSandboxRemovalHelper''')
+$view.Execute()
+try {
+    $record = $view.Fetch()
+    if (-not $record -or $record.DataSize(1) -le 0 -or $record.DataSize(1) -gt 4MB) { throw 'MSI is missing its embedded sandbox helper' }
+    # ReadStream format 1 is a BSTR with one byte per character, not UTF-8.
+    $taoEmbeddedBytes = [Text.Encoding]::GetEncoding(28591).GetBytes($record.ReadStream(1, $record.DataSize(1), 1))
+    $taoHasher = [Security.Cryptography.SHA256]::Create()
+    try { $taoEmbeddedHash = ([BitConverter]::ToString($taoHasher.ComputeHash($taoEmbeddedBytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $taoHasher.Dispose() }
+    $taoExpectedHelper = Join-Path (Split-Path -Parent $PSScriptRoot) 'src-tauri\resources\native\tao-windows-sandbox.exe'
+    if ($taoEmbeddedHash -ne (Get-FileHash -LiteralPath $taoExpectedHelper -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'MSI embedded cleanup helper differs from the verified resource' }
+    Write-Host "[Tao MSI] Embedded sandbox helper SHA-256: $taoEmbeddedHash"
+} finally { $view.Close() }
 
 Write-Host "[Tao MSI] Verified $fileCount files, $modelFiles model data files, $([math]::Round($totalBytes / 1MB, 1)) MiB unpacked"

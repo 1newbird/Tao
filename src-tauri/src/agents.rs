@@ -255,4 +255,33 @@ mod tests {
         assert_eq!(storage::load_runtime_configuration_at(&root).unwrap(), legacy);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn execution_and_compaction_are_validated_and_snapshot_scoped() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.execution.backend, "local");
+        assert_eq!(legacy.compaction.mode, "inherit");
+        let catalog = migrate(RuntimeConfiguration::default());
+        let captured = snapshot(&catalog, "default").unwrap();
+        let mut edited = catalog.clone();
+        edited.profiles[0].configuration.execution.backend = "docker".into();
+        edited.profiles[0].configuration.execution.network = "deny".into();
+        edited.profiles[0].configuration.compaction.mode = "automatic".into();
+        edited.profiles[0].configuration.compaction.reserve_tokens = 4096;
+        let changed = revise(edited, &catalog).unwrap();
+        assert_eq!(captured.configuration.execution.backend, "local");
+        assert_eq!(changed.profiles[0].revision, catalog.profiles[0].revision + 1);
+        let mut invalid = RuntimeConfiguration::default();
+        invalid.execution.allowed_env.push("NODE_OPTIONS".into());
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        let mut invalid_catalog = catalog.clone();
+        invalid_catalog.profiles[0].configuration.execution.allowed_env.push("TAO_SANDBOX_CHILD".into());
+        assert!(normalize(invalid_catalog).is_err());
+        let mut invalid = RuntimeConfiguration::default();
+        invalid.execution.allowed_hosts.push("-invalid.example".into());
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        let mut invalid = RuntimeConfiguration::default();
+        invalid.compaction.reserve_tokens = 0;
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+    }
 }

@@ -1,7 +1,7 @@
 {
   "name": "tao",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.2.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
@@ -10,9 +10,11 @@
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-dev.ps1",
     "test:agents": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-agents.ps1",
     "test:ui": "node scripts/test-ui-rendering.mjs",
+    "test:sandbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-sandbox.ps1",
     "preview": "vite preview",
     "preview:ui": "node scripts/preview-ui.mjs",
     "tao:prepare": "node scripts/prepare-tauri-release.mjs",
+    "tao:node": "node scripts/build-sandbox-node.mjs",
     "tao:verify": "node scripts/verify-tauri-release.mjs",
     "tao:release": "node scripts/release-tauri.mjs",
     "tao:release:nsis": "node scripts/release-tauri.mjs --bundles nsis",

@@ -6,6 +6,7 @@ mod storage;
 mod agents;
 mod collaboration;
 mod context;
+mod prompt_runs;
 
 use models::{
     AgentCatalog, AppSettings, AppState, AttachmentReference, ConnectionTestRequest, ConnectionTestResult,
@@ -14,6 +15,7 @@ use models::{
     SendMessageRequest, SetConversationModelRequest,
     SetConversationPermissionModeRequest, WorkspaceFile, WorkspaceListing,
     TestCustomToolRequest, TestCustomToolResult,
+    PromptRun, PromptRunUpdate, PromptStartReceipt,
 };
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -176,6 +178,11 @@ fn create_conversation_with_workspace(
 #[tauri::command]
 async fn delete_conversation(app: AppHandle, conversation_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        app.state::<prompt_runs::PromptRunManager>().initialize(&app)?;
+        let _transaction = storage::conversation_guard()?;
+        if let Some(conversation) = storage::load_conversation_unlocked(&app, &conversation_id)? {
+            storage::ensure_conversation_idle(&conversation)?;
+        }
         let manager = app.state::<runtime::TaoRuntimeManager>();
         let runtime_status = manager.status().ok();
         if runtime_status.as_ref().is_some_and(|status| status.ready) {
@@ -197,7 +204,7 @@ async fn delete_conversation(app: AppHandle, conversation_id: String) -> Result<
             // A session may still be opening while the host becomes ready.
             manager.stop();
         }
-        storage::delete_conversation(&app, &conversation_id)
+        storage::delete_conversation_unlocked(&app, &conversation_id)
     })
     .await
     .map_err(|error| format!("等待删除会话失败：{error}"))?
@@ -345,11 +352,13 @@ fn set_workspace_agent_default(app: AppHandle, workspace_path: String, profile_i
 async fn set_conversation_agent(app: AppHandle, conversation_id: String, profile_id: String) -> Result<Conversation, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let snapshot = agents::snapshot(&agents::load(&app)?, &profile_id)?;
-        let mut conversation = storage::load_conversation_if_exists(&app, &conversation_id)?.ok_or("会话不存在")?;
         let manager = app.state::<runtime::TaoRuntimeManager>();
         if manager.status()?.ready {
             manager.request(&app, serde_json::json!({ "type": "close_idle_session", "conversationId": conversation_id }), Duration::from_secs(10))?;
         }
+        let _transaction = storage::conversation_guard()?;
+        let mut conversation = storage::load_conversation_unlocked(&app, &conversation_id)?.ok_or("会话不存在")?;
+        storage::ensure_conversation_idle(&conversation)?;
         if conversation.messages.is_empty() {
             if let Some(defaults) = &snapshot.default_model {
                 conversation.provider = defaults.provider.clone();
@@ -369,6 +378,9 @@ async fn test_custom_tool(
     app: AppHandle,
     request: TestCustomToolRequest,
 ) -> Result<TestCustomToolResult, String> {
+    if request.execution.backend != "local" && request.workspace_path.as_ref().is_none_or(|path| path.trim().is_empty()) {
+        return Err("测试沙盒工具前请先选择工作区".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let manager = app.state::<runtime::TaoRuntimeManager>();
         let workspace_path = request
@@ -389,6 +401,7 @@ async fn test_custom_tool(
                 "input": request.input,
                 "workspacePath": workspace_path,
                 "permissionRule": request.permission_rule,
+                "execution": request.execution,
             }),
             // Tool timeout is at most 120 seconds; allow its process-tree
             // cancellation and result delivery to finish before the RPC expires.
@@ -407,15 +420,8 @@ async fn test_custom_tool(
 }
 
 #[tauri::command]
-fn abort_generation(app: AppHandle, conversation_id: String) -> Result<(), String> {
-    app.state::<runtime::TaoRuntimeManager>().request(
-        &app,
-        serde_json::json!({
-            "type": "abort",
-            "conversationId": conversation_id,
-        }),
-        Duration::from_secs(30),
-    )?;
+fn abort_generation(app: AppHandle, conversation_id: String, request_id: String) -> Result<(), String> {
+    app.state::<prompt_runs::PromptRunManager>().cancel(&app, &conversation_id, &request_id)?;
     Ok(())
 }
 
@@ -425,6 +431,7 @@ fn queue_message(app: AppHandle, request: QueueMessageRequest) -> Result<(), Str
     if text.is_empty() {
         return Err("追加消息不能为空".to_string());
     }
+    if request.request_id.is_empty() { return Err("追加消息缺少目标任务".into()); }
     let command_type = match request.behavior.as_str() {
         "steer" => "steer",
         "follow_up" => "follow_up",
@@ -435,6 +442,7 @@ fn queue_message(app: AppHandle, request: QueueMessageRequest) -> Result<(), Str
         serde_json::json!({
             "type": command_type,
             "conversationId": request.conversation_id,
+            "requestId": request.request_id,
             "message": text,
         }),
         Duration::from_secs(30),
@@ -494,31 +502,102 @@ async fn test_connection(
 }
 
 #[tauri::command]
-async fn send_message(app: AppHandle, request: SendMessageRequest) -> Result<Conversation, String> {
+async fn send_message(app: AppHandle, request: SendMessageRequest) -> Result<PromptStartReceipt, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let manager = app.state::<runtime::TaoRuntimeManager>();
-        pi::send_message(&app, &manager, request)
+        match app.state::<prompt_runs::PromptRunManager>().start_message(&app, request) {
+            Ok(update) => PromptStartReceipt { update: Some(update), error: None },
+            Err(error) => PromptStartReceipt { update: None, error: Some(error) },
+        }
     })
         .await
-        .map_err(|error| format!("等待 Tao 运行失败：{error}"))?
+        .map_err(|error| format!("等待 Tao 运行失败：{error}"))
 }
 
 #[tauri::command]
-async fn retry_message(app: AppHandle, request: RetryMessageRequest) -> Result<Conversation, String> {
+async fn retry_message(app: AppHandle, request: RetryMessageRequest) -> Result<PromptStartReceipt, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let manager = app.state::<runtime::TaoRuntimeManager>();
-        pi::retry_message(&app, &manager, request)
+        match app.state::<prompt_runs::PromptRunManager>().start_retry(&app, request) {
+            Ok(update) => PromptStartReceipt { update: Some(update), error: None },
+            Err(error) => PromptStartReceipt { update: None, error: Some(error) },
+        }
     })
         .await
-        .map_err(|error| format!("等待 Tao 运行失败：{error}"))?
+        .map_err(|error| format!("等待 Tao 运行失败：{error}"))
+}
+
+#[tauri::command]
+fn list_prompt_runs(app: AppHandle) -> Result<Vec<PromptRun>, String> {
+    app.state::<prompt_runs::PromptRunManager>().list(&app)
+}
+
+#[tauri::command]
+async fn get_sandbox_status(app: AppHandle, image: String, backend: Option<String>, workspace_path: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<runtime::TaoRuntimeManager>().request(&app,
+        serde_json::json!({ "type": "sandbox_status", "image": image, "backend":backend, "workspacePath":workspace_path }), Duration::from_secs(20)))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn initialize_windows_sandbox(app: AppHandle, workspace_path: String) -> Result<serde_json::Value, String> {
+    change_windows_sandbox(app,Some(workspace_path),false).await
+}
+
+#[tauri::command]
+async fn remove_windows_sandbox(app: AppHandle) -> Result<serde_json::Value, String> {
+    change_windows_sandbox(app,None,true).await
+}
+
+async fn change_windows_sandbox(app: AppHandle, workspace_path: Option<String>, remove: bool) -> Result<serde_json::Value, String> {
+    #[cfg(not(target_os="windows"))]
+    { let _=(app,workspace_path,remove); return Err("此功能仅支持 Windows".into()); }
+    #[cfg(target_os="windows")]
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::os::windows::process::CommandExt;
+        let workspace=workspace_path.as_ref().map(std::fs::canonicalize).transpose().map_err(|e|e.to_string())?;
+        if workspace.as_ref().is_some_and(|path|!path.is_dir()) {return Err("请选择工作区目录".into());}
+        let resource=app.path().resource_dir().map_err(|e|e.to_string())?.join("native/tao-windows-sandbox.exe");
+        let helper=if cfg!(debug_assertions) {std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/native/tao-windows-sandbox.exe")} else {resource};
+        if !helper.is_file() {return Err("缺少原生执行器，请先运行 scripts/build-windows-sandbox.ps1".into());}
+        // Values stay in environment variables. No user path is interpolated as PowerShell code.
+        let script=r#"$ErrorActionPreference='Stop';try{$taoArgs=@($env:TAO_SETUP_OPERATION);if($env:TAO_SETUP_WORKSPACE){$taoArgs+=@('--metadata-path',('"'+$env:TAO_SETUP_WORKSPACE.TrimEnd('\')+'"'))};$taoProcess=Start-Process -FilePath $env:TAO_SETUP_HELPER -ArgumentList $taoArgs -Verb RunAs -WindowStyle Hidden -Wait -PassThru;exit $taoProcess.ExitCode}catch{$taoError=$_.Exception;while($taoError){if($taoError.NativeErrorCode -eq 1223){exit 1223};$taoError=$taoError.InnerException};exit 1}"#;
+        let helper_text=helper.to_string_lossy();
+        let helper_text=helper_text.strip_prefix(r"\\?\").unwrap_or(&helper_text);
+        let status=std::process::Command::new("powershell.exe").args(["-NoLogo","-NoProfile","-NonInteractive","-Command",script])
+            .env("TAO_SETUP_HELPER",helper_text).env("TAO_SETUP_WORKSPACE",workspace.as_deref().unwrap_or(std::path::Path::new("")))
+            .env("TAO_SETUP_OPERATION",if remove {"--compat-cleanup"}else{"--compat-prepare"})
+            .creation_flags(0x08000000).status().map_err(|e|e.to_string())?;
+        if status.code()==Some(1223) {return Err("已取消 Windows 管理员授权；操作未执行，可以稍后重试。".into());}
+        if !status.success() {return Err(format!("原生授权操作未完成（退出码 {:?}）。请先停止本机所有 Tao 原生工具，并确认已准备过的磁盘仍在线，再重试；没有回退本机。",status.code()));}
+        if remove {return Ok(serde_json::json!({"removed":true}));}
+        app.state::<runtime::TaoRuntimeManager>().request(&app,serde_json::json!({"type":"sandbox_status","backend":"windows","workspacePath":workspace_path}),Duration::from_secs(20))
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+fn get_prompt_run(app: AppHandle, conversation_id: String, request_id: Option<String>) -> Result<Option<PromptRunUpdate>, String> {
+    app.state::<prompt_runs::PromptRunManager>().get(&app, &conversation_id, request_id.as_deref())
+}
+
+#[tauri::command]
+fn retry_save_prompt_run(app: AppHandle, conversation_id: String, request_id: String) -> Result<PromptRunUpdate, String> {
+    app.state::<prompt_runs::PromptRunManager>().retry_save(&app, &conversation_id, &request_id)
+}
+
+#[tauri::command]
+async fn cancel_prompt_run(app: AppHandle, conversation_id: String, request_id: String) -> Result<PromptRunUpdate, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<prompt_runs::PromptRunManager>().cancel(&app, &conversation_id, &request_id)
+    }).await.map_err(|error| error.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(runtime::TaoRuntimeManager::default())
+        .manage(prompt_runs::PromptRunManager::default())
         .setup(|app| {
             let handle = app.handle().clone();
+            let _ = app.state::<prompt_runs::PromptRunManager>().initialize(&handle);
             // Keep the window available so the startup error can be shown and
             // local conversation management remains usable.
             let _ = app.state::<runtime::TaoRuntimeManager>().start(&handle);
@@ -564,6 +643,13 @@ pub fn run() {
             test_connection,
             send_message,
             retry_message,
+            list_prompt_runs,
+            get_prompt_run,
+            get_sandbox_status,
+            initialize_windows_sandbox,
+            remove_windows_sandbox,
+            retry_save_prompt_run,
+            cancel_prompt_run,
             choose_workspace_directory,
             choose_message_files,
             list_workspace,
@@ -571,6 +657,13 @@ pub fn run() {
             read_workspace_diff,
             write_export_file
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Tao");
+        .build(tauri::generate_context!())
+        .expect("error while building Tao")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<prompt_runs::PromptRunManager>().begin_shutdown();
+                app.state::<runtime::TaoRuntimeManager>().shutdown();
+                app.state::<prompt_runs::PromptRunManager>().finish_shutdown(app);
+            }
+        });
 }

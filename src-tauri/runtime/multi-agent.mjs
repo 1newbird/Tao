@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { intersectExecution } from "./execution-policy.mjs";
 import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, rmSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
 import { DOCS_TOOL_NAME } from "./prompt-policy.mjs";
@@ -100,6 +101,7 @@ function stricterMode(a, b) {
 
 export function restrictChildConfiguration(parent, child) {
   const result = structuredClone(child);
+  result.execution = intersectExecution(parent.execution, child.execution);
   result.toolMode = "custom";
   result.enabledTools = availableBuiltins(child).filter((name) => availableBuiltins(parent).includes(name));
   result.customTools = (child.customTools ?? []).filter((tool) => tool.enabled).flatMap((tool) => {

@@ -14,8 +14,10 @@ Tao 原创部分使用根目录 `LICENSE` 中的 PolyForm Noncommercial License 
 ## Node.js 与附带组件
 
 - 来源：<https://nodejs.org/>
-- 发布准备脚本使用官方 Windows x64 运行时。
-- 安装资源中的 `node/LICENSE` 原样复制自所用 Node 发行包，包含 Node.js 及该发行包内第三方组件的许可通知。
+- Windows x64 运行时基于固定的 Node.js 22.23.3 官方源码构建，浮动合入 libuv 的 AppContainer 命名管道修复；属于 Tao 随包提供的定制构建，不是 Node 官方发行二进制。
+- 补丁来源：<https://github.com/libuv/libuv/commit/2cadaa401670>，保留 libuv contributors 的 MIT 授权；源码片段与构建说明位于 `native/node-runtime/`。
+- 安装资源中的 `node/LICENSE` 原样复制自所用官方源码，包含 Node.js 及附带第三方组件的许可通知。npm 及依赖保留其包内原声明。
+- `node/BUILD-MANIFEST.json` 记录源码、补丁和运行时资源校验值与编译参数；`scripts/build-sandbox-node.mjs` 提供构建步骤。
 
 ## 其他依赖
 

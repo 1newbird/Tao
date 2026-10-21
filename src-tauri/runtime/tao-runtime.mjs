@@ -1,13 +1,16 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { exec, execFile } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
-import { promisify } from "node:util";
 import { applyToolPolicy, assertHttpTarget, canonicalTarget, resolveHeaderReferences } from "./policy.mjs";
 import { AgentCoordinator, CHILD_COORDINATION_TOOLS, COORDINATION_TOOLS, recoverInterruptedTeams, readTeamRecord, listTeamRuns, teamView, userCommandFingerprint } from "./multi-agent.mjs";
 import { COORDINATION_SNIPPETS, DOCS_TOOL_NAME, createDocumentationTool, customToolSnippet, resolveDelegation } from "./prompt-policy.mjs";
 import { promptConfiguration, contextTemplate, environmentContext, environmentPrompt, captureInitialContext, readContextSnapshot } from "./context.mjs";
+import { createExecutor, sandboxStatus } from "./execution.mjs";
+import { executionToolDefinitions } from "./execution-tools.mjs";
+import { executionConfiguration, assertCredentialReferences, restrictedExecution, sandboxToolInput } from "./execution-policy.mjs";
+import { compactionSettings, compactionInstructions, compactionConfiguration } from "./compaction-policy.mjs";
+import { configureWindowsSandbox, windowsSandboxStatus } from "./windows-sandbox.mjs";
 
 const startedAt = Date.now();
 const argumentsByName = new Map();
@@ -17,12 +20,14 @@ for (let index = 2; index < process.argv.length; index += 2) {
 
 const piRoot = resolve(argumentsByName.get("--pi-root") ?? process.cwd());
 const taoHome = resolve(argumentsByName.get("--tao-home") ?? join(process.env.USERPROFILE ?? process.cwd(), ".tao"));
+configureWindowsSandbox(taoHome);
 const fallbackCwd = resolve(argumentsByName.get("--cwd") ?? piRoot);
 const sessionsDirectory = join(taoHome, "sessions");
 const sessionHandles = new Map();
 const sessionCreations = new Map();
 const pendingPermissions = new Map();
 const requestEpochs = new Map();
+const pendingPromptRequests = new Map();
 const DEFAULT_PERMISSION_TIMEOUT_MS = 60_000;
 let shuttingDown = false;
 let sdk;
@@ -30,7 +35,7 @@ let sharedModelRuntime;
 let validateToolArguments;
 let buildSystemPrompt;
 let createAllToolDefinitions;
-const execFileAsync = promisify(execFile);
+let getShellConfig;
 
 function commandProfile(command) {
   return resolveDelegation(command.runtimeConfiguration ?? loadRuntimeProfile() ?? {}).profile;
@@ -300,55 +305,21 @@ async function readHttpResponse(response) {
   } finally { reader.releaseLock(); }
 }
 
-function executeToolProcess(program, args, options, signal) {
-  signal.throwIfAborted();
-  return new Promise((resolveResult, reject) => {
-    let stopping;
-    let aborted = false;
-    const onAbort = () => {
-      if (aborted) return;
-      aborted = true;
-      // Kill the owned process tree before its parent disappears. Native exec's
-      // AbortSignal handling only kills cmd.exe/the direct child on Windows.
-      stopping = (async () => {
-        if (!child.pid) return;
-        if (process.platform === "win32") {
-          try {
-            await execFileAsync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, timeout: 5000 });
-          } catch {
-            child.kill();
-          }
-        } else {
-          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
-        }
-      })();
-    };
-    const complete = async (error, stdout, stderr) => {
-      signal.removeEventListener("abort", onAbort);
-      await stopping;
-      if (aborted) reject(new Error("工具执行已取消或超时"));
-      else if (error) reject(error);
-      else resolveResult({ stdout, stderr });
-    };
-    const child = args === null
-      ? exec(program, options, complete)
-      : execFile(program, args, options, complete);
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
-  });
-}
-
-async function executeConfiguredCustomTool(configuration, params, cwd, signal) {
+async function executeConfiguredCustomTool(configuration, params, cwd, signal, execution) {
+  const executor = createExecutor(execution, cwd);
   const parameters = customToolSchema(configuration);
   params = validateToolArguments({ name: configuration.name, parameters }, { name: configuration.name, arguments: params });
   const timeoutMs = Math.min(120_000, Math.max(1000, Number(configuration.timeoutMs) || 120_000));
   const executionSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
   const kind = String(configuration?.kind ?? "command").toLowerCase();
   if (kind === "http") {
+    if (executor.policy.network === "deny") throw new Error("此组合禁止工具联网");
     const url = renderCustomToolTemplate(configuration.url, params);
     if (!url.trim()) throw new Error("自定义 HTTP 工具缺少 URL");
+    assertCredentialReferences(configuration.headers, execution);
     const headers = resolveHeaderReferences(configuration.headers);
     assertHttpTarget(url, configuration.allowedHosts ?? []);
+    assertHttpTarget(url, executor.policy.allowedHosts);
     const method = String(configuration.method || "GET").toUpperCase();
     const body = renderCustomToolTemplate(configuration.bodyTemplate, params);
     const response = await fetch(url, {
@@ -368,25 +339,13 @@ async function executeConfiguredCustomTool(configuration, params, cwd, signal) {
   if (kind === "process") {
     const args = JSON.parse(configuration.arguments || "[]");
     if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) throw new Error("程序参数必须是 JSON 字符串数组");
-    const executable = ["node", "node.exe"].includes(configuration.executable) ? process.execPath : configuration.executable;
-    const result = await executeToolProcess(executable, args.map((arg) => renderCustomToolTemplate(arg, params)), {
-      cwd, windowsHide: true, detached: process.platform !== "win32", maxBuffer: 2 * 1024 * 1024,
-      env: { ...process.env, TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}) },
-    }, executionSignal);
+    const executable = ["node", "node.exe"].includes(configuration.executable) ? executor.policy.backend === "docker" ? "node" : process.execPath : configuration.executable;
+    const result = await executor.execute(executable, args.map((arg) => renderCustomToolTemplate(arg, params)), { signal: executionSignal, environment: { TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}) } });
     return normalizeCustomToolOutput([result.stdout, result.stderr].filter(Boolean).join("\n") || "程序执行完成");
   }
   const command = renderCustomToolTemplate(configuration.command, params).trim();
   if (!command) throw new Error("自定义命令工具缺少命令模板");
-  const result = await executeToolProcess(command, null, {
-    cwd,
-    windowsHide: true,
-    detached: process.platform !== "win32",
-    maxBuffer: 2 * 1024 * 1024,
-    env: {
-      ...process.env,
-      TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}),
-    },
-  }, executionSignal);
+  const result = await executor.command(command, { signal: executionSignal, environment: { TAO_TOOL_INPUT_JSON: JSON.stringify(params ?? {}) } });
   const output = [result.stdout, result.stderr].filter((value) => value?.trim()).join("\n");
   return normalizeCustomToolOutput(output || `命令执行完成（退出码 ${result.code ?? 0}）`);
 }
@@ -404,7 +363,7 @@ function configuredCustomTools(profile, cwd) {
     execute: async (_toolCallId, params, signal) => ({
       content: [{
         type: "text",
-        text: await executeConfiguredCustomTool(configuration, params, cwd, signal),
+        text: await executeConfiguredCustomTool(configuration, params, cwd, signal, profile.execution),
       }],
       details: {},
     }),
@@ -431,7 +390,7 @@ function sessionToolSelection(profile) {
     : undefined;
 }
 
-function createRuntimeSettingsManager() {
+function createRuntimeSettingsManager(profile = {}, model) {
   const settingsPath = join(taoHome, "settings.json");
   let userSettings = {};
   if (existsSync(settingsPath)) {
@@ -443,7 +402,7 @@ function createRuntimeSettingsManager() {
   }
 
   const providerRetry = userSettings.retry?.provider ?? {};
-  return sdk.SettingsManager.inMemory({
+  return sdk.SettingsManager.inMemory(compactionSettings({
     ...userSettings,
     retry: {
       ...(userSettings.retry ?? {}),
@@ -455,7 +414,7 @@ function createRuntimeSettingsManager() {
       },
     },
     httpIdleTimeoutMs: userSettings.httpIdleTimeoutMs ?? 60_000,
-  });
+  }, profile.compaction, model));
 }
 
 function resolveSessionCwd(command) {
@@ -1192,9 +1151,27 @@ function createTaoPermissionExtension(conversationId, cwd, customTools = [], pro
     name: "tao-permissions",
     hidden: true,
     factory(pi) {
+      pi.on("session_before_compact", async (event) => {
+        if (compactionConfiguration(profile.compaction).mode !== "automatic") return undefined;
+        const handle = sessionHandles.get(conversationId);
+        if (!handle?.runtime.session.model) return { cancel: true };
+        try {
+          const session = handle.runtime.session;
+          const auth = await sharedModelRuntime.getAuth(session.model);
+          const model = auth?.auth.baseUrl ? { ...session.model, baseUrl: auth.auth.baseUrl } : session.model;
+          const headers = auth?.auth.headers && Object.fromEntries(Object.entries(auth.auth.headers).filter(([, value]) => typeof value === "string"));
+          return { compaction: await sdk.compact(event.preparation, model, auth?.auth.apiKey, headers,
+            compactionInstructions(profile.compaction, event.customInstructions), event.signal, session.thinkingLevel,
+            session.agent.streamFunction, auth?.env, session.settingsManager.getRetrySettings()) };
+        } catch (error) {
+          handle.compactionError = String(error.message ?? error).slice(0, 1000);
+          emitEvent(conversationId, handle.activeRequest?.requestId, "context", "compaction_warning", `上下文压缩未完成：${handle.compactionError}`);
+          return { cancel: true };
+        }
+      });
       pi.on("before_agent_start", (event) => {
         const handle = sessionHandles.get(conversationId);
-        const environment = environmentContext({ cwd, permissionMode: handle?.activeRequest?.permissionMode, profile });
+        const environment = environmentContext({ cwd, permissionMode: handle?.activeRequest?.permissionMode, profile, effectiveCompaction: handle?.runtime.session.settingsManager.getCompactionSettings() });
         if (handle) handle.contextEnvironment = environment;
         return { systemPrompt: `${event.systemPrompt}\n\n${environmentPrompt(environment)}` };
       });
@@ -1233,7 +1210,8 @@ function createTaoPermissionExtension(conversationId, cwd, customTools = [], pro
         let audit;
         try {
           assertAttempt();
-          audit = applyToolPolicy(cwd, event.toolName, event.input, classifyToolPermission(cwd, event.toolName, event.input, customTools), profile);
+          const input = BUILTIN_TOOL_NAMES.includes(event.toolName) ? sandboxToolInput(cwd, event.input, profile.execution) : event.input;
+          audit = applyToolPolicy(cwd, event.toolName, input, classifyToolPermission(cwd, event.toolName, input, customTools), profile);
         } catch {
           // Hook errors may otherwise be reported by the kernel while it
           // continues tool execution. An unavailable audit must fail closed.
@@ -1252,10 +1230,10 @@ function createTaoPermissionExtension(conversationId, cwd, customTools = [], pro
           const audit = { ...applyToolPolicy(event.cwd || cwd, "bash", { command: event.command }, classifyToolPermission(event.cwd || cwd, "bash", { command: event.command }, customTools), profile), title: "执行用户命令" };
           result = await resolvePermission(conversationId, event.cwd || cwd, audit);
         } catch { result = { allowed: false, reason: "无法完成权限确认" }; }
-        if (result.allowed) return undefined;
+        if (result.allowed && !restrictedExecution(profile.execution)) return undefined;
         return {
           result: {
-            output: `Tao 权限策略已拒绝：${result.reason ?? "权限确认未完成"}`,
+            output: `Tao 权限策略已拒绝：${result.allowed ? "受限组合请通过受控 bash 工具执行命令" : result.reason ?? "权限确认未完成"}`,
             exitCode: 1,
             cancelled: false,
             truncated: false,
@@ -1639,6 +1617,7 @@ function bindSessionEvents(handle) {
       return;
     }
     if (event.type === "compaction_start") {
+      delete handle.compactionError;
       const activityId = active ? addActivity(active, "context", "正在整理上下文") : undefined;
       if (active) {
         active.contextTraceId = addTrace(active, handle, "context", "整理上下文", {
@@ -1653,17 +1632,19 @@ function bindSessionEvents(handle) {
       return;
     }
     if (event.type === "compaction_end") {
-      const text = event.aborted ? "上下文整理已停止" : "上下文整理完成";
+      const errorMessage = event.errorMessage || handle.compactionError;
+      delete handle.compactionError;
+      const text = errorMessage ? `上下文整理失败：${truncateDisplay(errorMessage, 180)}` : event.aborted ? "上下文整理已停止" : "上下文整理完成";
       const activityId = active
         ? updateLastActivity(active, "context", {
           text,
-          state: event.aborted ? "error" : "completed",
+          state: event.aborted || errorMessage ? "error" : "completed",
         })
         : null;
       if (active?.contextTraceId) {
         updateTrace(active, handle, active.contextTraceId, {
-          status: event.aborted || event.errorMessage ? "error" : "completed",
-          summary: event.errorMessage ? truncateDisplay(event.errorMessage, 180) : text,
+          status: event.aborted || errorMessage ? "error" : "completed",
+          summary: text,
           metadata: {
             reason: event.reason ?? "unknown",
             ...(event.result?.tokensBefore ? { tokensBefore: event.result.tokensBefore } : {}),
@@ -1990,16 +1971,29 @@ async function createSession(command, fingerprint) {
 
   const sessionCwd = resolveSessionCwd(command);
   const profile = commandProfile(command);
+  const execution = executionConfiguration(profile.execution);
+  compactionConfiguration(profile.compaction);
+  if (restrictedExecution(profile.execution) && profile.extensionsEnabled) throw new Error("受限执行策略暂不支持任意 Extension，请关闭扩展以避免绕过执行边界");
+  if (execution.backend === "docker") {
+    if (!command.workspacePath?.trim()) throw new Error("Docker 沙盒需要先选择工作区");
+    const status = await sandboxStatus(execution.image);
+    if (!status.available) throw new Error(`Docker 沙盒不可用，未回退本机执行：${status.error}`);
+  }
+  if (execution.backend === "windows") {
+    if(!command.workspacePath?.trim()) throw new Error("Windows 原生沙盒需要先选择工作区");
+    const status=await windowsSandboxStatus(sessionCwd);
+    if(!status.available) throw new Error(`Windows 原生沙盒不可用，未回退本机：${status.error}`);
+  }
   const selectedTools = sessionToolSelection(profile);
   const coordination = coordinationTools(command);
-  const customTools = [...configuredCustomTools(profile, sessionCwd), ...coordination, createDocumentationTool(sdk.defineTool)];
+  const customTools = [...executionToolDefinitions(createAllToolDefinitions, profile, sessionCwd, getShellConfig), ...configuredCustomTools(profile, sessionCwd), ...coordination, createDocumentationTool(sdk.defineTool)];
   const sessionDirectory = command.childSessionDirectory ?? sessionsDirectory;
   const sessionFile = join(sessionDirectory, `${command.conversationId}.jsonl`);
   const sessionManager = sdk.SessionManager.open(sessionFile, sessionDirectory, sessionCwd);
   const createRuntime = async ({ cwd, agentDir, sessionManager: manager, sessionStartEvent }) => {
     // Pi's in-memory settings manager retains the user's configured values
     // while applying Tao's request protection without writing settings.json.
-    const settingsManager = createRuntimeSettingsManager();
+    const settingsManager = createRuntimeSettingsManager(profile, model);
     const resourceLoader = new sdk.DefaultResourceLoader({
       cwd,
       agentDir,
@@ -2101,7 +2095,7 @@ async function testConfiguredCustomTool(command) {
       input = { input: command.input };
     }
   }
-  const output = await executeConfiguredCustomTool(configuration, input, cwd);
+  const output = await executeConfiguredCustomTool(configuration, input, cwd, undefined, command.execution);
   return {
     output,
     tool: configuration.name || "custom_tool",
@@ -2134,8 +2128,13 @@ async function prepareSession(command) {
 }
 
 async function cancelActiveRequest(command) {
-  requestEpochs.set(command.conversationId, (requestEpochs.get(command.conversationId) ?? 0) + 1);
   const handle = sessionHandles.get(command.conversationId);
+  const target = handle?.activeRequest;
+  const currentId = target?.requestId ?? pendingPromptRequests.get(command.conversationId);
+  if (command.requestId && command.requestId !== currentId) {
+    return { cancelled: false, reason: "请求已结束或标识不匹配" };
+  }
+  requestEpochs.set(command.conversationId, (requestEpochs.get(command.conversationId) ?? 0) + 1);
   if (!handle?.activeRequest) return { cancelled: true };
   cancelPendingPermissions(command.conversationId, "请求已停止，权限确认已取消");
   handle.activeRequest.aborted = true;
@@ -2145,16 +2144,26 @@ async function cancelActiveRequest(command) {
     // The original prompt may have settled between the check and abort.
   }
   const started = Date.now();
-  while (handle.activeRequest && Date.now() - started < 5_000) {
+  while (handle.activeRequest === target && Date.now() - started < 5_000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  if (handle.activeRequest) {
+  if (handle.activeRequest === target) {
     await disposeSession(command.conversationId);
   }
   return { cancelled: true };
 }
 
 async function promptSession(command) {
+  if (pendingPromptRequests.has(command.conversationId)) throw new Error("当前会话正在运行，请等待当前任务结束");
+  pendingPromptRequests.set(command.conversationId, command.requestId);
+  try {
+    return await runPromptSession(command);
+  } finally {
+    if (pendingPromptRequests.get(command.conversationId) === command.requestId) pendingPromptRequests.delete(command.conversationId);
+  }
+}
+
+async function runPromptSession(command) {
   const epoch = requestEpochs.get(command.conversationId) ?? 0;
   const readyStarted = Date.now();
   emitEvent(command.conversationId, command.requestId, "runtime", "status", "正在连接会话…");
@@ -2314,6 +2323,8 @@ async function dispatch(command) {
       return prepareSession(command);
     case "test_custom_tool":
       return testConfiguredCustomTool(command);
+    case "sandbox_status":
+      return command.backend === "windows" ? windowsSandboxStatus(command.workspacePath) : sandboxStatus(command.image);
     case "prompt":
       return promptSession(command);
     case "cancel_active":
@@ -2326,6 +2337,7 @@ async function dispatch(command) {
       const handle = sessionHandles.get(command.conversationId);
       if (!handle) throw new Error("当前会话尚未创建");
       if (!handle.activeRequest) throw new Error("当前会话没有正在生成的消息，不能追加调整");
+      if (command.requestId && command.requestId !== handle.activeRequest.requestId) throw new Error("目标任务已结束，未向新任务追加消息");
       await handle.runtime.session.steer(command.message);
       return null;
     }
@@ -2333,6 +2345,7 @@ async function dispatch(command) {
       const handle = sessionHandles.get(command.conversationId);
       if (!handle) throw new Error("当前会话尚未创建");
       if (!handle.activeRequest) throw new Error("当前会话没有正在生成的消息，不能排队后续消息");
+      if (command.requestId && command.requestId !== handle.activeRequest.requestId) throw new Error("目标任务已结束，未向新任务追加消息");
       await handle.runtime.session.followUp(command.message);
       return null;
     }
@@ -2364,6 +2377,7 @@ try {
   sdk = await import(sdkEntry);
   ({ buildSystemPrompt } = await import(pathToFileURL(join(piRoot, "packages", "coding-agent", "src", "core", "system-prompt.ts")).href));
   ({ createAllToolDefinitions } = await import(pathToFileURL(join(piRoot, "packages", "coding-agent", "src", "core", "tools", "index.ts")).href));
+  ({ getShellConfig } = await import(pathToFileURL(join(piRoot, "packages", "coding-agent", "src", "utils", "shell.ts")).href));
   ({ validateToolArguments } = await import(pathToFileURL(join(piRoot, "packages", "ai", "src", "index.ts")).href));
   sharedModelRuntime = await sdk.ModelRuntime.create({ authPath: join(taoHome, "auth.json"), modelsPath: join(taoHome, "models.json") });
   await sharedModelRuntime.refresh({ allowNetwork: false });

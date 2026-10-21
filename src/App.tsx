@@ -8,6 +8,8 @@ import { catalogWithEditor, editorConfiguration, emptyConfiguration, exportProfi
 import type { AgentCatalog, AgentProfile, AgentSnapshot, CustomToolConfiguration, CustomToolPermissionMode, RuntimeConfiguration, ToolPermissionConfiguration } from "./agent-profiles";
 import { AgentIcon, ConversationProfileMenu, ProfileActionMenu } from "./ProfileMenu";
 import { DelegationSettings } from "./DelegationSettings";
+import { ExecutionSettings } from "./ExecutionSettings";
+import { CompactionSettings } from "./CompactionSettings";
 import { CollaborationBoard } from "./CollaborationBoard";
 import { CollaborationWorkspace } from "./CollaborationWorkspace";
 import { ContextPanel, ContextPreview } from "./ContextPanel";
@@ -16,6 +18,9 @@ import { ACCENT_OPTIONS, accentStyle } from "./appearance";
 import { resolvePanelLayout } from "./panel-layout";
 import { MarkdownContent } from "./MarkdownContent";
 import { useFollowScroll } from "./useFollowScroll";
+import { usePromptRuns } from "./usePromptRuns";
+import { latestPromptRun, newerRun, runBlocksSubmission, runStatus } from "./prompt-run-state";
+import type { PromptRun, PromptRunUpdate } from "./prompt-run-state";
 import { outputAnswer, updateOutputBlocks } from "./stream-blocks";
 import type { OutputBlock } from "./stream-blocks";
 
@@ -67,6 +72,7 @@ interface Conversation {
   workspaceName: string;
   messages: Message[];
   agentSnapshot?: AgentSnapshot | null;
+  promptRuns?: PromptRun[];
 }
 
 interface AppSettings {
@@ -240,7 +246,7 @@ interface PermissionPrompt {
 type QueueBehavior = "steer" | "follow_up";
 type ExportFormat = "markdown" | "json" | "text";
 type MainView = "chat" | "customization" | "settings";
-type CustomizationSection = "overview" | "prompt" | "context" | "session" | "agent" | "skills" | "extensions";
+type CustomizationSection = "overview" | "prompt" | "context" | "execution" | "session" | "agent" | "skills" | "extensions";
 type SettingsSection = "models" | "appearance" | "language" | "data" | "runtime" | "about" | "help";
 type AccentColor = "tao" | "developer" | "ocean" | "amber" | "graphite";
 type ThemeMode = "light" | "dark" | "system";
@@ -1079,6 +1085,11 @@ function WorkspaceDiffPreview({ content, filePath }: { content: string; filePath
   );
 }
 
+function promptStream(requestId: string, startedAt: number, status: string): StreamState {
+  return { requestId, startedAt, status, thinking: "", thinkingOpen: true, text: "", outputBlocks: [], activityOpen: true,
+    activities: [], traces: [], toolActive: false, completed: false, stopping: false, queued: [] };
+}
+
 function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -1244,6 +1255,8 @@ function App() {
   const completedTracesRef = useRef<Record<string, TraceItem[]>>({});
   const preparingRef = useRef(new Set<string>());
   const generatingRef = useRef(new Set<string>());
+  const localSubmissions = useRef(new Map<string, { requestId: string; text: string; attachments: AttachmentReference[] }>());
+  const promptRuns = usePromptRuns<Conversation>(!loading, applyPromptRunUpdate, rejectPromptSubmission);
   const chatScroll = useFollowScroll(activeId, mainView === "chat" && !loading);
   const workScroll = useFollowScroll(`${activeId}:${mainView}`, runtimeOpen && rightPanelView === "runtime");
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1428,7 +1441,7 @@ function App() {
     let content = "";
     let extension = "txt";
     if (format === "json") {
-      content = JSON.stringify({ ...activeConversation, agentSnapshot: safeSnapshot(activeConversation.agentSnapshot), messages: activeConversation.messages.map((message) => ({ ...message, retry: message.retry ? { ...message.retry, agentSnapshot: safeSnapshot(message.retry.agentSnapshot) } : undefined })) }, null, 2);
+      content = JSON.stringify({ ...activeConversation, promptRuns: undefined, agentSnapshot: safeSnapshot(activeConversation.agentSnapshot), messages: activeConversation.messages.map((message) => ({ ...message, retry: message.retry ? { ...message.retry, agentSnapshot: safeSnapshot(message.retry.agentSnapshot) } : undefined })) }, null, 2);
       extension = "json";
     } else if (format === "markdown") {
       content = [
@@ -1498,6 +1511,7 @@ function App() {
           ? state.conversations
           : [await invoke<Conversation>("create_conversation")];
         setConversations(sortConversations(initialConversations));
+        promptRuns.hydrate(initialConversations);
         const initialId = initialConversations[0]?.id ?? "";
         activeIdRef.current = initialId;
         setActiveId(initialId);
@@ -1562,6 +1576,7 @@ function App() {
     void listen<TaoRuntimeEvent>("tao-runtime-event", ({ payload }) => {
       if (disposed || payload.version !== 1) return;
       if (payload.category === "metric" && payload.elapsedMs !== undefined) {
+        if (streamsRef.current[payload.conversationId]?.requestId !== payload.requestId) return;
         setTimings((current) => {
           const timing = current[payload.conversationId] ?? {};
           return {
@@ -1944,6 +1959,8 @@ function App() {
     setConnectionStatus(null);
   }, [apiKeys, selectedSettingsProfile, selectedSettingsProvider]);
   const activeStream = streams[activeId];
+  const activeRun = promptRuns.runs[activeId];
+  const canAppendToActive = activeRun?.state === "running" && !promptRuns.uncertain[activeId];
   const activeConversationGenerating = Boolean(generatingIds[activeId]);
   const anyConversationGenerating = Object.values(generatingIds).some(Boolean);
   const anyConversationPreparing = Object.values(preparingIds).some(Boolean);
@@ -2706,6 +2723,7 @@ function App() {
           input: customToolTestInput,
           workspacePath: activeWorkspacePath || null,
           permissionRule: runtimeDraft.toolPermissions[tool.name] ?? { mode: "inherit", pathScope: "any" },
+          execution: runtimeDraft.execution,
         },
       });
       setCustomToolTestOutput(result.output);
@@ -2874,6 +2892,116 @@ function App() {
     }
   }
 
+  function storePromptConversation(updatedConversation: Conversation, conversationId: string) {
+      const completedActivities = completedActivitiesRef.current[conversationId]
+        ?? streamsRef.current[conversationId]?.activities
+        ?? [];
+      const completedTraces = completedTracesRef.current[conversationId]
+        ?? streamsRef.current[conversationId]?.traces
+        ?? [];
+      const completedAssistant = [...updatedConversation.messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      let conversationToStore = updatedConversation;
+      if (completedAssistant) {
+        if (!completedAssistant.activities?.length && completedActivities.length) {
+          setMessageActivities((current) => ({
+            ...current,
+            [completedAssistant.id]: completedActivities,
+          }));
+        }
+        const tracesForMessage = completedAssistant.traces?.length
+          ? completedAssistant.traces
+          : completedTraces;
+        if (tracesForMessage.length) {
+          setMessageTraces((current) => ({
+            ...current,
+            [completedAssistant.id]: tracesForMessage,
+          }));
+        }
+        if (!completedAssistant.traces?.length && completedTraces.length) {
+          conversationToStore = {
+            ...updatedConversation,
+            messages: updatedConversation.messages.map((message) =>
+              message.id === completedAssistant.id ? { ...message, traces: completedTraces } : message,
+            ),
+          };
+        }
+        setMessageActivityOpen((current) => ({
+          ...current,
+          [completedAssistant.id]: Boolean(streamsRef.current[conversationId]?.activityUserToggled && streamsRef.current[conversationId]?.activityOpen),
+        }));
+        setMessageThinkingOpen((current) => ({
+          ...current,
+          [completedAssistant.id]: false,
+        }));
+      }
+      setConversations((current) => sortConversations([
+        conversationToStore,
+        ...current.filter((item) => item.id !== conversationToStore.id),
+      ]));
+      setStreams((current) => {
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      });
+  }
+
+  function applyPromptRunUpdate({ run, conversation, confirmed }: PromptRunUpdate<Conversation>) {
+    const conversationId = run.conversationId;
+    const pending = localSubmissions.current.get(conversationId);
+    if (!runBlocksSubmission(run) && pending && pending.requestId !== run.requestId) return;
+    if (pending?.requestId === run.requestId) localSubmissions.current.delete(conversationId);
+    flushStreamDeltas();
+    if (runBlocksSubmission(run)) {
+      generatingRef.current.add(conversationId);
+      setGeneratingIds((current) => ({ ...current, [conversationId]: true }));
+      if (conversation) setConversations((current) => sortConversations([conversation, ...current.filter((item) => item.id !== conversationId)]));
+      setStreams((current) => {
+        const previous = current[conversationId];
+        const stream = previous?.requestId === run.requestId ? previous : promptStream(run.requestId, run.startedAt, runStatus(run));
+        return { ...current, [conversationId]: { ...stream, status: confirmed === false ? "正在核对已有任务状态…" : runStatus(run), completed: run.state === "save_failed",
+          completedMs: run.state === "save_failed" ? stream.completedMs ?? Math.max(0, (run.finishedAt ?? run.updatedAt) - run.startedAt) : stream.completedMs,
+          stopping: run.state === "cancelling" && !run.error } };
+      });
+      if (run.state === "cancelling" && run.error) setNotice({ conversationId, text: run.error });
+      return;
+    }
+    if (conversation) storePromptConversation(conversation, conversationId);
+    generatingRef.current.delete(conversationId);
+    delete completedActivitiesRef.current[conversationId];
+    delete completedTracesRef.current[conversationId];
+    setGeneratingIds((current) => { const next = { ...current }; delete next[conversationId]; return next; });
+    setNotice((current) => current.conversationId === conversationId ? { conversationId, text: "" } : current);
+  }
+
+  function rejectPromptSubmission(conversationId: string, error: string, requestId: string) {
+    const rejected = localSubmissions.current.get(conversationId);
+    if (rejected?.requestId === requestId) {
+      localSubmissions.current.delete(conversationId);
+      if (activeIdRef.current === conversationId) {
+        setInput((current) => current || rejected.text);
+        setMessageAttachments((current) => current.length ? current : rejected.attachments);
+      }
+    }
+    if ((rejected?.requestId === requestId && !streamsRef.current[conversationId]) || streamsRef.current[conversationId]?.requestId === requestId) {
+      generatingRef.current.delete(conversationId);
+      setGeneratingIds((current) => { const next = { ...current }; delete next[conversationId]; return next; });
+      setStreams((current) => { if (current[conversationId]?.requestId !== requestId) return current; const next = { ...current }; delete next[conversationId]; return next; });
+    }
+    setNotice({ conversationId, text: error });
+    void invoke<AppState>("get_app_state").then((state) => {
+      const saved = state.conversations.find((item) => item.id === conversationId);
+      if (!saved) return;
+      setConversations((current) => sortConversations(current.map((item) => {
+        if (item.id !== conversationId) return item;
+        const known = latestPromptRun(item);
+        const incoming = latestPromptRun(saved);
+        return known && (!incoming || newerRun(incoming, known)) ? item : saved;
+      })));
+    }).catch(() => {});
+  }
+
   async function runPrompt(
     conversation: Conversation,
     text: string,
@@ -2884,6 +3012,7 @@ function App() {
     const requestId = crypto.randomUUID();
     const retryErrorMessageId = options.retryErrorMessageId;
     const attachments = options.attachments ?? [];
+    localSubmissions.current.set(conversationId, { requestId, text, attachments });
 
     setInput("");
     setMessageAttachments([]);
@@ -2940,109 +3069,13 @@ function App() {
       );
     }
 
-    try {
-      const updatedConversation = await invoke<Conversation>(
-        retryErrorMessageId ? "retry_message" : "send_message",
-        {
-          request: retryErrorMessageId
-            ? {
-                requestId,
-                conversationId,
-                errorMessageId: retryErrorMessageId,
-              }
-            : {
-                requestId,
-                conversationId,
-                text,
-                provider: configuration.provider,
-                model: configuration.model,
-                baseUrl: configuration.baseUrl,
-                api: configuration.api,
-                thinkingLevel: configuration.thinkingLevel,
-                permissionMode: configuration.permissionMode,
-                permissionTimeoutMs: configuration.permissionTimeoutMs,
-                attachments,
-              },
-        },
-      );
-      const completedActivities = completedActivitiesRef.current[conversationId]
-        ?? streamsRef.current[conversationId]?.activities
-        ?? [];
-      const completedTraces = completedTracesRef.current[conversationId]
-        ?? streamsRef.current[conversationId]?.traces
-        ?? [];
-      const completedAssistant = [...updatedConversation.messages]
-        .reverse()
-        .find((message) => message.role === "assistant");
-      let conversationToStore = updatedConversation;
-      if (completedAssistant) {
-        if (!completedAssistant.activities?.length && completedActivities.length) {
-          setMessageActivities((current) => ({
-            ...current,
-            [completedAssistant.id]: completedActivities,
-          }));
-        }
-        const tracesForMessage = completedAssistant.traces?.length
-          ? completedAssistant.traces
-          : completedTraces;
-        if (tracesForMessage.length) {
-          setMessageTraces((current) => ({
-            ...current,
-            [completedAssistant.id]: tracesForMessage,
-          }));
-        }
-        if (!completedAssistant.traces?.length && completedTraces.length) {
-          conversationToStore = {
-            ...updatedConversation,
-            messages: updatedConversation.messages.map((message) =>
-              message.id === completedAssistant.id ? { ...message, traces: completedTraces } : message,
-            ),
-          };
-        }
-        setMessageActivityOpen((current) => ({
-          ...current,
-          [completedAssistant.id]: Boolean(streamsRef.current[conversationId]?.activityUserToggled && streamsRef.current[conversationId]?.activityOpen),
-        }));
-        setMessageThinkingOpen((current) => ({
-          ...current,
-          [completedAssistant.id]: false,
-        }));
-      }
-      setConversations((current) => sortConversations([
-        conversationToStore,
-        ...current.filter((item) => item.id !== conversationToStore.id),
-      ]));
-      setStreams((current) => {
-        const next = { ...current };
-        delete next[conversationId];
-        return next;
-      });
-    } catch (error: unknown) {
-      setNotice({ conversationId, text: String(error) });
-      try {
-        const state = await invoke<AppState>("get_app_state");
-        setConversations(sortConversations(state.conversations));
-        setSettings(state.settings);
-        setApiKeyConfigured(state.apiKeyConfigured);
-        setProviderAuthConfigured(state.providerAuthConfigured);
-      } catch {
-        setNotice({ conversationId, text: `模型调用失败，且无法重新加载会话：${String(error)}` });
-      }
-      setStreams((current) => {
-        const next = { ...current };
-        delete next[conversationId];
-        return next;
-      });
-    } finally {
-      generatingRef.current.delete(conversationId);
-      delete completedActivitiesRef.current[conversationId];
-      delete completedTracesRef.current[conversationId];
-      setGeneratingIds((current) => {
-        const next = { ...current };
-        delete next[conversationId];
-        return next;
-      });
-    }
+    await promptRuns.submit({
+      command: retryErrorMessageId ? "retry_message" : "send_message",
+      request: retryErrorMessageId ? { requestId, conversationId, errorMessageId: retryErrorMessageId }
+        : { requestId, conversationId, text, provider: configuration.provider, model: configuration.model,
+            baseUrl: configuration.baseUrl, api: configuration.api, thinkingLevel: configuration.thinkingLevel,
+            permissionMode: configuration.permissionMode, permissionTimeoutMs: configuration.permissionTimeoutMs, attachments },
+    });
   }
 
   async function sendMessage(event?: FormEvent) {
@@ -3095,15 +3128,17 @@ function App() {
   async function queueMessage(text: string, behavior: QueueBehavior) {
     if (!activeConversation || !generatingRef.current.has(activeConversation.id)) return;
     const conversationId = activeConversation.id;
+    const requestId = streamsRef.current[conversationId]?.requestId;
+    if (!requestId) return;
     try {
       await invoke("queue_message", {
-        request: { conversationId, text, behavior },
+        request: { conversationId, requestId, text, behavior },
       });
-      setInput("");
+      if (activeIdRef.current === conversationId) setInput((current) => current.trim() === text.trim() ? "" : current);
       setNotice({ conversationId, text: "" });
       setStreams((current) => {
         const stream = current[conversationId];
-        if (!stream) return current;
+        if (!stream || stream.requestId !== requestId || stream.completed) return current;
         return {
           ...current,
           [conversationId]: {
@@ -3129,7 +3164,9 @@ function App() {
       };
     });
     try {
-      await invoke("abort_generation", { conversationId });
+      const requestId = streamsRef.current[conversationId]?.requestId;
+      if (!requestId) throw new Error("无法确定停止目标，请刷新任务状态");
+      await promptRuns.cancel(conversationId, requestId);
     } catch (error: unknown) {
       setStreams((current) => {
         const stream = current[conversationId];
@@ -3238,7 +3275,7 @@ function App() {
       </button>
       <aside className="sidebar">
         <div className="brand-row">
-          <div className="brand-mark">T</div>
+          <div className="brand-mark"><img src="/tao.svg" alt="" /></div>
           <span>Tao</span>
         </div>
 
@@ -3312,8 +3349,8 @@ function App() {
                   {(generatingIds[conversation.id] || preparingIds[conversation.id]) && (
                     <span
                       className={`conversation-runtime-mark ${generatingIds[conversation.id] ? "generating" : "preparing"}`}
-                      aria-label={generatingIds[conversation.id] ? "正在生成" : "正在准备"}
-                      title={generatingIds[conversation.id] ? "正在生成" : "正在准备"}
+                      aria-label={promptRuns.runs[conversation.id]?.state === "save_failed" ? "结果待保存" : generatingIds[conversation.id] ? "正在生成" : "正在准备"}
+                      title={promptRuns.runs[conversation.id]?.state === "save_failed" ? "结果待保存" : generatingIds[conversation.id] ? "正在生成" : "正在准备"}
                     />
                   )}
                   {unreadIds[conversation.id] && conversation.id !== activeId && !generatingIds[conversation.id] && (
@@ -3574,7 +3611,7 @@ function App() {
                       onToggle={() => toggleActivity(activeConversation.id)}
                       onToggleThinking={() => toggleStreamThinking(activeConversation.id)}
                     />
-                    {!activeStream.text && !activeStream.thinking ? (
+                    {!activeStream.completed && !activeStream.text && !activeStream.thinking ? (
                       <div className="thinking-row"><span /><span /><span /></div>
                     ) : null}
                     {activeStream.text && (
@@ -3624,15 +3661,22 @@ function App() {
             </div>
           ) : (
             <div className="empty-state">
-              <div className="empty-mark">T</div>
+              <div className="empty-mark"><img src="/tao.svg" alt="" /></div>
               <h2>今天想做什么？</h2>
-              <p>选择模型后，发送一条消息验证 Tao 的连接。</p>
+              <p>从一个问题、一份资料，或一个想法开始。</p>
             </div>
           )}
           </div>
         </section>
 
         <div className="composer-area">
+          {promptRuns.statusError && activeConversationGenerating && <div className="notice" role="status">{promptRuns.statusError}</div>}
+          {promptRuns.uncertain[activeId] && <div className="notice" role="status">发送状态尚未确认，正在核对后台；请勿重复发送。
+            <button type="button" onClick={() => void promptRuns.confirmSubmission(activeId).catch((error) => setNotice({ conversationId: activeId, text: String(error) }))}>重新确认提交</button>
+          </div>}
+          {activeRun?.state === "save_failed" && <div className="notice" role="status">{activeRun.error}
+            <button type="button" onClick={() => void promptRuns.retrySave(activeId, activeRun.requestId).catch((error) => setNotice({ conversationId: activeId, text: String(error) }))}>重试保存</button>
+          </div>}
           {!chatScroll.following && <button type="button" className="scroll-to-latest" onClick={chatScroll.scrollToLatest}>↓ 回到最新</button>}
           {notice.text && (notice.conversationId === null || notice.conversationId === activeId) && (
             <div className="notice">{notice.text}</div>
@@ -3720,7 +3764,7 @@ function App() {
               disabled={loading}
               onChange={(event) => setInput(event.currentTarget.value)}
               onKeyDown={handleComposerKeyDown}
-              placeholder={activeConversationGenerating ? "补充要求或排队下一条消息" : "向 Tao 提问"}
+              placeholder={canAppendToActive ? "补充要求或排队下一条消息" : "向 Tao 提问"}
               rows={1}
               value={input}
             />
@@ -3760,10 +3804,10 @@ function App() {
                   <span>{activeConversation?.workspacePath ? workspaceLabel(activeConversation.workspacePath) : "默认工作区"}</span>
                 </button>
                 <span className="composer-shortcut">
-                  {activeConversationGenerating ? "Enter 追加 · Shift+Enter 换行" : "Enter 发送 · Shift+Enter 换行"}
+                  {canAppendToActive ? "Enter 追加 · Shift+Enter 换行" : activeConversationGenerating ? "等待当前任务状态确认" : "Enter 发送 · Shift+Enter 换行"}
                 </span>
               </div>
-              <span>{activeConversationGenerating ? "Enter 追加 · Shift+Enter 换行" : "Enter 发送 · Shift+Enter 换行"}</span>
+              <span>{canAppendToActive ? "Enter 追加 · Shift+Enter 换行" : activeConversationGenerating ? "等待当前任务状态确认" : "Enter 发送 · Shift+Enter 换行"}</span>
               <div className="composer-actions">
                 <div className="model-chip-menu" aria-label="当前会话模型">
                   <button
@@ -3832,7 +3876,7 @@ function App() {
                     </div>
                   )}
                 </div>
-                {activeConversationGenerating && (
+                {canAppendToActive && (
                   <select
                     aria-label="追加方式"
                     value={queueBehavior}
@@ -3842,12 +3886,12 @@ function App() {
                     <option value="follow_up">回答后继续</option>
                   </select>
                 )}
-                {activeConversationGenerating && input.trim() && (
+                {canAppendToActive && input.trim() && (
                   <button className="queue-submit" type="submit" aria-label="追加消息" title="追加消息">
                     ↑
                   </button>
                 )}
-                {activeConversationGenerating ? (
+                {activeConversationGenerating && activeRun?.state !== "save_failed" ? (
                   <button
                     className="stop-button"
                     type="button"
@@ -3859,7 +3903,7 @@ function App() {
                     <span aria-hidden="true" />
                   </button>
                 ) : (
-                  <button disabled={(!input.trim() && !messageAttachments.length) || loading} type="submit" aria-label="发送消息">
+                  <button disabled={activeConversationGenerating || (!input.trim() && !messageAttachments.length) || loading} type="submit" aria-label="发送消息">
                     ↑
                   </button>
                 )}
@@ -3888,13 +3932,14 @@ function App() {
                   ["overview", "组合设置"],
                   ["prompt", "系统提示词"],
                   ["agent", "工具与权限"],
+                  ["execution", "执行与沙盒"],
                   ["skills", "Skills"],
                   ["context", "上下文策略"],
                   ["session", "会话策略"],
                   ["extensions", "Extension"],
                 ] as Array<[CustomizationSection, string]>).map(([section, label]) => (
                   <button className={customizationSection === section ? "active" : ""} key={section} type="button" aria-current={customizationSection === section ? "page" : undefined} onClick={() => setCustomizationSection(section)}>
-                    <span>{label}</span>{!(["overview", "prompt", "agent", "skills"] as CustomizationSection[]).includes(section) && <small>规划中</small>}
+                    <span>{label}</span>{!(["overview", "prompt", "agent", "skills", "execution", "context"] as CustomizationSection[]).includes(section) && <small>规划中</small>}
                   </button>
                 ))}
               </nav>
@@ -4308,10 +4353,12 @@ function App() {
                   </div>
                 </div>
               )}
-              {(["context", "session", "extensions"] as CustomizationSection[]).includes(customizationSection) && (
+              {customizationSection === "execution" && <ExecutionSettings key={selectedProfileId} value={runtimeDraft.execution} onChange={(execution) => updateRuntimeDraft({ execution })} />}
+              {customizationSection === "context" && <CompactionSettings value={runtimeDraft.compaction} onChange={(compaction) => updateRuntimeDraft({ compaction })} />}
+              {(["session", "extensions"] as CustomizationSection[]).includes(customizationSection) && (
                 <div className="workspace-section placeholder-section">
                   <div className="placeholder-icon">◇</div>
-                  <h2>{customizationSection === "context" ? "上下文" : customizationSection === "session" ? "会话策略" : "Extension"}</h2>
+                  <h2>{customizationSection === "session" ? "会话策略" : "Extension"}</h2>
                   <p>页面入口已经预留，后续会在明确配置边界后接入。</p>
                 </div>
               )}
@@ -4691,6 +4738,7 @@ function App() {
                     <h2>权限确认</h2>
                     <p>设置工具执行需要确认时的等待时间。超时后会自动拒绝，不会继续挂起当前回答。</p>
                   </div>
+                  <section className="settings-card"><h3>执行环境与沙盒</h3><p>文件、网络、凭据和沙盒规则按智能体组合保存，不受“完全放行”覆盖。配置后在新会话使用，或在空闲会话应用新版组合。</p><button type="button" className="secondary-button compact-button" onClick={() => { setMainView("customization"); setCustomizationSection("execution"); }}>管理执行与沙盒</button></section>
                   <div className="settings-card two-column-settings">
                     <label className="setting-field">
                       <span>确认超时</span>
@@ -5034,7 +5082,8 @@ function App() {
               <div><dt>提示词</dt><dd>{runtimeDraft.systemPrompt.trim() ? "已配置" : "未配置"}</dd></div>
               <div><dt>加载方式</dt><dd>{runtimeDraft.systemPromptMode === "append" ? "追加默认提示词" : "替换身份与角色"}</dd></div>
               <div><dt>上下文预览</dt><dd>系统提示词页</dd></div>
-              <div><dt>上下文压缩</dt><dd>沿用内核默认</dd></div>
+              <div><dt>执行环境</dt><dd>{runtimeDraft.execution?.backend === "docker" ? "Docker 沙盒" : runtimeDraft.execution?.backend === "windows" ? "Windows 原生预览" : "本机运行"}{runtimeDraft.execution?.workspaceAccess === "read_only" ? " · 只读" : ""}</dd></div>
+              <div><dt>上下文压缩</dt><dd>{runtimeDraft.compaction?.mode === "disabled" ? "关闭自动压缩" : runtimeDraft.compaction?.mode === "automatic" ? `自动 · 预留 ${runtimeDraft.compaction.reserveTokens} / 近期 ${runtimeDraft.compaction.keepRecentTokens}` : "沿用 Runtime 默认策略"}</dd></div>
               <div><dt>Skills</dt><dd>{runtimeDraft.skillsEnabled ? "已启用" : "已关闭"}</dd></div>
               <div><dt>Extension</dt><dd>{runtimeDraft.extensionsEnabled ? "已启用" : "已关闭"} · 编辑器待开发</dd></div>
             </dl>

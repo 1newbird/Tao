@@ -1,0 +1,7 @@
+{
+  "version": "22.23.3",
+  "sourceSha256": "bd97093e1a1e9243338950c174a693a64d4e0926a9c6ce259962bc58d5e96909",
+  "upstreamPatch": "https://github.com/libuv/libuv/commit/2cadaa401670",
+  "patchFile": "upstream-pipe.c.txt",
+  "platform": "win32-x64"
+}

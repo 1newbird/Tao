@@ -1,0 +1,50 @@
+:root {
+  --tao-scrollbar-thumb: rgb(94 94 86 / 28%);
+}
+
+.theme-dark {
+  --tao-scrollbar-thumb: rgb(196 196 184 / 30%);
+}
+
+/* Fixed gutters avoid a content shift when the thumb appears or disappears. */
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 24px;
+  border-radius: 999px;
+  background-color: transparent;
+}
+
+*[data-scroll-active]::-webkit-scrollbar-thumb {
+  background-color: var(--tao-scrollbar-thumb);
+}
+
+/* Fallback for engines without the WebKit scrollbar pseudo-elements. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  *[data-scroll-active] {
+    scrollbar-color: var(--tao-scrollbar-thumb) transparent;
+  }
+}
+
+@media (forced-colors: active) {
+  *::-webkit-scrollbar-thumb { background-color: CanvasText; }
+  * { scrollbar-color: auto; }
+}

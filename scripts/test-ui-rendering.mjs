@@ -8,6 +8,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const directory = await mkdtemp(join(process.cwd(), ".ui-render-test-"));
 try {
+  await writeFile(join(directory, "prompt-run-state.mjs"), ts.transpileModule(await readFile("src/prompt-run-state.ts", "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText);
+  const { newerRun, runBlocksSubmission } = await import(pathToFileURL(join(directory, "prompt-run-state.mjs")));
+  const completed = { requestId: "run-1", conversationId: "chat-1", sequence: 1, version: 3, state: "completed" };
+  assert(!newerRun(completed, { ...completed, version: 1, state: "starting" }), "晚到的启动回执不能覆盖完成状态");
+  const next = { ...completed, requestId: "run-2", sequence: 2, version: 1, state: "starting" };
+  assert(newerRun(completed, next), "新一轮任务必须按会话代次前进");
+  assert(!newerRun(next, { ...completed, version: 999 }), "旧任务的高版本结果不能覆盖新任务");
+  assert(!newerRun(completed, { ...completed, requestId: "collision", version: 4 }), "同代次不同身份不能互相覆盖");
+  assert(runBlocksSubmission({ ...completed, state: "save_failed" }) && !runBlocksSubmission(completed), "保存失败必须阻止重新执行并允许单独保存");
   await writeFile(join(directory, "stream-blocks.mjs"), ts.transpileModule(await readFile("src/stream-blocks.ts", "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText);
   const { updateOutputBlocks, outputAnswer } = await import(pathToFileURL(join(directory, "stream-blocks.mjs")));
   let blocks = [];

@@ -37,6 +37,33 @@ export interface RuntimeConfiguration {
   customTools: CustomToolConfiguration[];
   toolPermissions: Record<string, ToolPermissionConfiguration>;
   delegation?: DelegationConfiguration;
+  execution?: ExecutionConfiguration;
+  compaction?: CompactionConfiguration;
+}
+
+export interface ExecutionConfiguration {
+  backend: "local" | "docker" | "windows";
+  image: string;
+  fileScope: "any" | "workspace";
+  workspaceAccess: "read_write" | "read_only";
+  network: "inherit" | "allow" | "deny";
+  allowedHosts: string[];
+  allowedEnv: string[];
+}
+
+export interface CompactionConfiguration {
+  mode: "inherit" | "automatic" | "disabled";
+  reserveTokens: number;
+  keepRecentTokens: number;
+  instructions: string;
+}
+
+export function defaultExecution(): ExecutionConfiguration {
+  return { backend: "local", image: "node:22-bookworm-slim", fileScope: "any", workspaceAccess: "read_write", network: "inherit", allowedHosts: [], allowedEnv: [] };
+}
+
+export function defaultCompaction(): CompactionConfiguration {
+  return { mode: "inherit", reserveTokens: 16384, keepRecentTokens: 20000, instructions: "" };
 }
 
 export interface DelegationConfiguration {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="TaoSandboxLifecycleMarker" Guid="*" Win64="yes">
+        <RegistryValue Root="HKLM" Key="Software\Tao\Installer" Name="SandboxLifecycle" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <ComponentGroup Id="TaoSandboxLifecycle">
+      <ComponentRef Id="TaoSandboxLifecycleMarker" />
+    </ComponentGroup>
+    <!-- Upgrade removes the old package too: keep shared grants in that case.
+         Explicit removal fails while a native tool holds its machine lease. -->
+    <!-- Execute the MSI-embedded helper, never an elevated executable from a
+         user-selected, potentially writable installation directory. -->
+    <Binary Id="TaoSandboxRemovalHelper" SourceFile="$(sys.SOURCEFILEDIR)..\resources\native\tao-windows-sandbox.exe" />
+    <CustomAction Id="RemoveTaoSandboxCompatibility" BinaryKey="TaoSandboxRemovalHelper"
+      ExeCommand="--compat-cleanup --if-initialized"
+      Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveTaoSandboxCompatibility" Before="RemoveFiles">REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>
