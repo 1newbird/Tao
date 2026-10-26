@@ -17,7 +17,7 @@ Tao = Tauri 桌面产品 + Tao Runtime 装配层 + Tao 智能体内核
 - 在 Windows 桌面上提供中文 Agent 工作台；
 - 使用一个常驻 Node Runtime 托管多个独立 Tao AgentSession（源码 API 名称保留）；
 - 支持多会话、独立工作区、模型配置、流式回答、工具状态、权限确认和定制 Agent；
-- 提供包含 Node 与运行资源的 Windows x64 MSI；0.2.0 已完成用户安装试用并正式发布，干净电脑及异常路径专项另行追踪。
+- 提供包含 Node 与运行资源的 Windows x64 MSI；0.3.0 已完成自动与提取验收并正式发布，实际升级、干净电脑及异常路径专项另行追踪。
 
 ## 当前状态与证据
 
