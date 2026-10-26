@@ -6,6 +6,7 @@ mod storage;
 mod agents;
 mod collaboration;
 mod context;
+mod skills;
 mod prompt_runs;
 
 use models::{
@@ -37,7 +38,7 @@ fn choose_workspace_directory(app: AppHandle) -> Result<Option<String>, String> 
 #[tauri::command]
 fn choose_message_files(app: AppHandle) -> Result<Vec<AttachmentReference>, String> {
     const EXTENSIONS: &[&str] = &[
-        "txt", "md", "markdown", "mdx", "json", "jsonc", "yaml", "yml", "toml", "xml", "csv",
+        "pdf", "docx", "txt", "md", "markdown", "mdx", "json", "jsonc", "yaml", "yml", "toml", "xml", "csv",
         "log", "env", "ini", "conf", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "css",
         "scss", "less", "html", "htm", "vue", "svelte", "py", "go", "java", "kt", "swift",
         "c", "h", "cc", "cpp", "hpp", "cs", "sql", "sh", "bash", "ps1", "cmd", "bat",
@@ -49,7 +50,7 @@ fn choose_message_files(app: AppHandle) -> Result<Vec<AttachmentReference>, Stri
         .dialog()
         .file()
         .set_title("选择 Tao 附件")
-        .add_filter("文本与代码", EXTENSIONS)
+        .add_filter("文档、文本与代码", EXTENSIONS)
         .blocking_pick_files()
         .unwrap_or_default();
     if selected.len() > MAX_FILES {
@@ -538,6 +539,13 @@ async fn get_sandbox_status(app: AppHandle, image: String, backend: Option<Strin
 }
 
 #[tauri::command]
+async fn prepare_docker_image(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<runtime::TaoRuntimeManager>().request(&app,
+        serde_json::json!({ "type": "prepare_docker_image" }), Duration::from_secs(1100)))
+        .await.map_err(|error| format!("准备 Docker 镜像失败：{error}"))?
+}
+
+#[tauri::command]
 async fn initialize_windows_sandbox(app: AppHandle, workspace_path: String) -> Result<serde_json::Value, String> {
     change_windows_sandbox(app,Some(workspace_path),false).await
 }
@@ -613,6 +621,13 @@ pub fn run() {
             collaboration::focus_main_window,
             collaboration::get_member_appearance,
             context::preview_context,
+            context::test_web_search,
+            context::inspect_web_capabilities,
+            context::test_mcp_connection,
+            skills::list_skills,
+            skills::choose_and_import_skill,
+            skills::inspect_github_skill,
+            skills::install_github_skill,
             context::get_conversation_context,
             start_runtime,
             stop_runtime,
@@ -646,6 +661,7 @@ pub fn run() {
             list_prompt_runs,
             get_prompt_run,
             get_sandbox_status,
+            prepare_docker_image,
             initialize_windows_sandbox,
             remove_windows_sandbox,
             retry_save_prompt_run,

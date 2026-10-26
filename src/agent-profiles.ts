@@ -33,12 +33,39 @@ export interface RuntimeConfiguration {
   toolMode: "default" | "custom";
   enabledTools: string[];
   skillsEnabled: boolean;
+  skillInstallEnabled?: boolean;
+  enabledSkills?: string[] | null;
   extensionsEnabled: boolean;
   customTools: CustomToolConfiguration[];
   toolPermissions: Record<string, ToolPermissionConfiguration>;
   delegation?: DelegationConfiguration;
   execution?: ExecutionConfiguration;
   compaction?: CompactionConfiguration;
+  web?: WebConfiguration;
+  mcpServers?: McpServerConfiguration[];
+}
+
+export interface McpServerConfiguration {
+  id: string;
+  name: string;
+  enabled: boolean;
+  url: string;
+  tokenEnv: string;
+  allowPrivate: boolean;
+  allowedTools: string[];
+}
+
+export interface WebConfiguration {
+  searchEnabled: boolean;
+  fetchEnabled: boolean;
+  apiKeyEnv: string;
+  provider?: "brave" | "searxng";
+  searxngUrl?: string;
+  allowPrivateSearch?: boolean;
+}
+
+export function defaultWeb(): WebConfiguration {
+  return { searchEnabled: false, fetchEnabled: false, apiKeyEnv: "BRAVE_SEARCH_API_KEY", provider: "brave", searxngUrl: "", allowPrivateSearch: false };
 }
 
 export interface ExecutionConfiguration {
@@ -59,7 +86,7 @@ export interface CompactionConfiguration {
 }
 
 export function defaultExecution(): ExecutionConfiguration {
-  return { backend: "local", image: "node:22-bookworm-slim", fileScope: "any", workspaceAccess: "read_write", network: "inherit", allowedHosts: [], allowedEnv: [] };
+  return { backend: "local", image: "tao-runtime:0.1.0", fileScope: "any", workspaceAccess: "read_write", network: "inherit", allowedHosts: [], allowedEnv: [] };
 }
 
 export function defaultCompaction(): CompactionConfiguration {

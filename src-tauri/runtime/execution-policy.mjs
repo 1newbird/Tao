@@ -5,7 +5,7 @@ const UNSAFE_ENV = /^(?:NODE_OPTIONS|NODE_PATH|BASH_ENV|ENV|SHELLOPTS|LD_.*|DYLD
 
 export function executionConfiguration(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("执行策略必须是配置对象");
-  const result = { backend: "local", image: "node:22-bookworm-slim", fileScope: "any", workspaceAccess: "read_write", network: "allow", allowedHosts: [], allowedEnv: [], ...value };
+  const result = { backend: "local", image: "tao-runtime:0.1.0", fileScope: "any", workspaceAccess: "read_write", network: "allow", allowedHosts: [], allowedEnv: [], ...value };
   if (value.network === undefined || value.network === "inherit") result.network = result.backend !== "local" ? "deny" : "allow";
   if (!["local", "docker", "windows"].includes(result.backend) || !["any", "workspace"].includes(result.fileScope)
     || !["read_write", "read_only"].includes(result.workspaceAccess) || !["allow", "deny"].includes(result.network)) throw new Error("执行策略无效");

@@ -9,6 +9,11 @@ export const releaseLicensePaths = Object.freeze([
   "THIRD_PARTY_NOTICES.md",
   "pi/LICENSE",
   "node/LICENSE",
+  "runtime/node_modules/pdfjs-dist/LICENSE",
+  "runtime/node_modules/fflate/LICENSE",
+  "runtime/licenses/saxes-LICENSE",
+  "runtime/node_modules/xmlchars/LICENSE",
+  "runtime/node_modules/@napi-rs/canvas/LICENSE",
 ]);
 
 function sha256(bytes) {
@@ -30,6 +35,7 @@ export async function copyReleaseLicenses({ projectRoot, nodeExtractRoot, resour
     join(projectRoot, "THIRD_PARTY_NOTICES.md"),
     join(projectRoot, "vendor", "pi", "LICENSE"),
     join(nodeExtractRoot, "LICENSE"),
+    ...releaseLicensePaths.slice(5).map((path) => join(projectRoot, "src-tauri", path)),
   ];
   // Read all sources first so a missing notice cannot silently produce a subset.
   const contents = await Promise.all(sources.map(readRequired));

@@ -1,5 +1,10 @@
-param([string]$Image = 'node:22-bookworm-slim')
+param([string]$Image = 'tao-runtime:0.1.0')
 $ErrorActionPreference = 'Stop'
+if ($Image -eq 'tao-runtime:0.1.0') {
+    & node (Join-Path $PSScriptRoot 'prepare-docker-image.mjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Tao image build or verification failed. The previous image is preserved.' }
+    exit 0
+}
 if ($Image -notmatch '^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}$') { throw 'Invalid image reference.' }
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'Install Docker Desktop and enable Linux containers first.' }
 $endpointJson = & docker context inspect --format '{{json .Endpoints.docker.Host}}'

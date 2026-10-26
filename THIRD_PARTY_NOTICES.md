@@ -21,6 +21,8 @@ Tao 原创部分使用根目录 `LICENSE` 中的 PolyForm Noncommercial License 
 
 ## 其他依赖
 
+本地文档读取依赖独立记录于 `src-tauri/runtime/package-lock.json`：PDF.js (`pdfjs-dist`，Apache-2.0)、fflate（MIT）、saxes（ISC）及 xmlchars（MIT）；PDF.js 的 Node 兼容依赖 @napi-rs/canvas（MIT）包含 Windows x64 Skia 原生组件。发布资源原样保留包内许可、字体许可及原生组件 SBOM。saxes 的 npm 包未带完整 LICENSE，固定 v6.0.0 上游原文件保存在 `src-tauri/runtime/licenses/saxes-LICENSE`，来源 <https://raw.githubusercontent.com/lddubeau/saxes/v6.0.0/LICENSE>。
+
 Tao 使用 Tauri、React、TypeScript 及其他 Rust/npm 依赖。具体版本记录在 `package-lock.json`、`src-tauri/Cargo.lock` 和 `vendor/pi/package-lock.json`；许可与版权以各依赖自身文件为准。
 
 发布准备保留运行依赖包内自带的 LICENSE、NOTICE 等文件。新增、升级、移除或裁剪依赖时，需要核对对应许可义务，包括编译进前端或原生程序的依赖；锁文件和本说明不替代这些组件要求提供的完整许可、版权或源码材料。依赖许可材料的完整清单继续作为发布审核事项维护。
@@ -35,6 +37,11 @@ NOTICE
 THIRD_PARTY_NOTICES.md
 pi/LICENSE
 node/LICENSE
+runtime/node_modules/pdfjs-dist/LICENSE
+runtime/node_modules/fflate/LICENSE
+runtime/licenses/saxes-LICENSE
+runtime/node_modules/xmlchars/LICENSE
+runtime/node_modules/@napi-rs/canvas/LICENSE
 ```
 
 资源清单记录这些文件的 SHA-256，资源验证会检查内容是否完整。上述自动检查覆盖这些列出的文件，不代表对全部依赖的法律审查。

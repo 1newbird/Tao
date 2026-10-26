@@ -254,6 +254,8 @@ pub struct RuntimeConfiguration {
     #[serde(default)]
     pub enabled_tools: Vec<String>,
     pub skills_enabled: bool,
+    pub skill_install_enabled: bool,
+    pub enabled_skills: Option<Vec<String>>,
     pub extensions_enabled: bool,
     #[serde(default)]
     pub custom_tools: Vec<CustomToolConfiguration>,
@@ -262,6 +264,8 @@ pub struct RuntimeConfiguration {
     pub delegation: DelegationConfiguration,
     pub execution: ExecutionConfiguration,
     pub compaction: CompactionConfiguration,
+    pub web: WebConfiguration,
+    pub mcp_servers: Vec<McpServerConfiguration>,
 }
 
 impl Default for RuntimeConfiguration {
@@ -274,14 +278,44 @@ impl Default for RuntimeConfiguration {
             tool_mode: "default".to_string(),
             enabled_tools: Vec::new(),
             skills_enabled: false,
+            skill_install_enabled: false,
+            enabled_skills: None,
             extensions_enabled: false,
             custom_tools: Vec::new(),
             tool_permissions: BTreeMap::new(),
             delegation: DelegationConfiguration { enabled: true, ..Default::default() },
             execution: ExecutionConfiguration::default(),
             compaction: CompactionConfiguration::default(),
+            web: WebConfiguration::default(),
+            mcp_servers: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WebConfiguration {
+    pub search_enabled: bool,
+    pub fetch_enabled: bool,
+    pub api_key_env: String,
+    pub provider: String,
+    pub searxng_url: String,
+    pub allow_private_search: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpServerConfiguration {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub url: String,
+    pub token_env: String,
+    pub allow_private: bool,
+    pub allowed_tools: Vec<String>,
+}
+impl Default for WebConfiguration {
+    fn default() -> Self { Self { search_enabled: false, fetch_enabled: false, api_key_env: "BRAVE_SEARCH_API_KEY".into(), provider: "brave".into(), searxng_url: String::new(), allow_private_search: false } }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -296,7 +330,7 @@ pub struct ExecutionConfiguration {
     pub allowed_env: Vec<String>,
 }
 impl Default for ExecutionConfiguration {
-    fn default() -> Self { Self { backend: "local".into(), image: "node:22-bookworm-slim".into(), file_scope: "any".into(), workspace_access: "read_write".into(), network: "inherit".into(), allowed_hosts: Vec::new(), allowed_env: Vec::new() } }
+    fn default() -> Self { Self { backend: "local".into(), image: "tao-runtime:0.1.0".into(), file_scope: "any".into(), workspace_access: "read_write".into(), network: "inherit".into(), allowed_hosts: Vec::new(), allowed_env: Vec::new() } }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -75,6 +75,13 @@ try {
     const result = await run("node", ["-e", "const fs=require('fs');fs.writeFileSync('/workspace/result.txt','sandbox wrote');process.stdout.write(fs.readFileSync('/workspace/fixture.txt','utf8'))"]);
     assert(result.stdout.includes("needle 720"));
     assert.equal(await readFile(join(workspace, "result.txt"), "utf8"), "sandbox wrote");
+    await run("python3", ["-m", "venv", "/workspace/.venv"]);
+    const python = await run("/workspace/.venv/bin/python", ["-c", "import pathlib, ssl, sqlite3; pathlib.Path('/workspace/python-result.txt').write_text('跨容器保留', encoding='utf-8'); print('python-ready')"]);
+    assert(python.stdout.includes("python-ready"));
+    assert.equal(await readFile(join(workspace, "python-result.txt"), "utf8"), "跨容器保留");
+    await writeFile(join(workspace, "compile-smoke.c"), '#include <stdio.h>\nint main(void) { puts("tao-compiled"); return 0; }\n');
+    await run("gcc", ["/workspace/compile-smoke.c", "-o", "/workspace/compile-smoke"]);
+    assert((await run("/workspace/compile-smoke", [])).stdout.includes("tao-compiled"));
     await assert.rejects(() => run("node", [], { workerRequest: { operation: "read", path: "/etc/passwd" } }), /超出工作区/);
     await assert.rejects(() => createExecutor({ backend: "docker", workspaceAccess: "read_only" }, workspace).execute("node", ["-e", "require('fs').writeFileSync('/workspace/forbidden.txt','bad')"]), /EROFS|read-only/);
     assert(!existsSync(join(workspace, "forbidden.txt")));
@@ -104,7 +111,7 @@ try {
     const missing = createExecutor({ backend: "docker", image: "tao-test-image-does-not-exist:never" }, workspace);
     await assert.rejects(() => missing.command("touch should-not-exist"), /未回退/);
     assert(!existsSync(join(workspace, "should-not-exist")));
-    console.log("通过：真实 Docker 读写、工作区只读、越界文件拒绝、断网、凭据变量隔离、Windows 目录链接、取消清理和缺镜像不回退。");
+    console.log("通过：真实 Tao Docker 镜像、Python venv 跨容器复用、C 编译运行、读写、只读、越界拒绝、断网、凭据隔离、目录链接、取消清理和缺镜像不回退。");
   }
 } finally {
   const safeRoot = resolve(root);

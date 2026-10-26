@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { intersectExecution } from "./execution-policy.mjs";
+import { intersectWeb, WEB_TOOL_NAMES } from "./web-tools.mjs";
+import { intersectSkills } from "./skills.mjs";
+import { intersectMcp, MCP_TOOL_NAMES } from "./mcp-tools.mjs";
 import { mkdirSync, openSync, writeFileSync, fsyncSync, closeSync, renameSync, rmSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, isAbsolute } from "node:path";
 import { DOCS_TOOL_NAME } from "./prompt-policy.mjs";
@@ -102,6 +105,8 @@ function stricterMode(a, b) {
 export function restrictChildConfiguration(parent, child) {
   const result = structuredClone(child);
   result.execution = intersectExecution(parent.execution, child.execution);
+  result.web = intersectWeb(parent.web, child.web);
+  result.mcpServers = intersectMcp(parent, child);
   result.toolMode = "custom";
   result.enabledTools = availableBuiltins(child).filter((name) => availableBuiltins(parent).includes(name));
   result.customTools = (child.customTools ?? []).filter((tool) => tool.enabled).flatMap((tool) => {
@@ -111,7 +116,7 @@ export function restrictChildConfiguration(parent, child) {
     return upper ? [{ ...tool, permissionMode: upperMode === "deny" || ownMode === "deny" ? "deny" : upperMode === "ask" || ownMode === "ask" ? "ask" : "allow" }] : [];
   });
   result.toolPermissions = {};
-  for (const name of [...BUILTINS, ...COORDINATION_TOOLS, DOCS_TOOL_NAME, ...result.customTools.map((tool) => tool.name)]) {
+  for (const name of [...BUILTINS, ...WEB_TOOL_NAMES, ...MCP_TOOL_NAMES, ...COORDINATION_TOOLS, DOCS_TOOL_NAME, ...result.customTools.map((tool) => tool.name)]) {
     const upper = parent.toolPermissions?.[name];
     const own = child.toolPermissions?.[name];
     result.toolPermissions[name] = {
@@ -120,6 +125,9 @@ export function restrictChildConfiguration(parent, child) {
     };
   }
   result.skillsEnabled = Boolean(parent.skillsEnabled && child.skillsEnabled);
+  // Global skill installation is an explicit main-session application action.
+  result.skillInstallEnabled = false;
+  result.enabledSkills = intersectSkills(parent, child);
   // Arbitrary extensions can register tools outside this intersection. Until
   // their capabilities are declared, delegated sessions do not load extensions.
   result.extensionsEnabled = false;

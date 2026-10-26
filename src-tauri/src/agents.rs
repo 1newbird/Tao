@@ -69,9 +69,20 @@ pub fn normalize(mut catalog: AgentCatalog) -> Result<AgentCatalog, String> {
         let mut seen = HashSet::new();
         profile.custom_tool_ids.retain(|id| seen.insert(id.clone()));
         if profile.custom_tool_ids.iter().any(|id| !tool_ids.contains(id)) { return Err(format!("组合 {} 引用了不存在的工具", profile.name)); }
+        if catalog.tools.iter().any(|tool| profile.custom_tool_ids.contains(&tool.id)
+            && ((tool.name == "web_search" && profile.configuration.web.search_enabled)
+                || (tool.name == "web_fetch" && profile.configuration.web.fetch_enabled))) {
+            return Err(format!("组合 {} 的联网工具与自定义工具重名，请先重命名自定义工具", profile.name));
+        }
+        if catalog.tools.iter().any(|tool| profile.custom_tool_ids.contains(&tool.id) && matches!(tool.name.as_str(), "mcp_list_tools" | "mcp_call_tool")) && profile.configuration.mcp_servers.iter().any(|server| server.enabled) {
+            return Err(format!("组合 {} 的 MCP 与自定义工具重名，请先重命名自定义工具", profile.name));
+        }
     }
     if !profile_ids.contains(&catalog.default_profile_id) { return Err("默认组合不存在".into()); }
     for profile in &catalog.profiles {
+        if profile.configuration.skill_install_enabled && catalog.tools.iter().any(|tool| profile.custom_tool_ids.contains(&tool.id) && matches!(tool.name.as_str(), "list_installed_skills" | "inspect_github_skill" | "install_github_skill")) {
+            return Err(format!("组合 {} 的技能管理与自定义工具重名，请先重命名自定义工具", profile.name));
+        }
         if profile.configuration.delegation.allowed_profile_ids.iter().any(|id| !profile_ids.contains(id)) {
             return Err(format!("组合 {} 引用了不存在的子代理组合，请先移除委派引用", profile.name));
         }
@@ -165,6 +176,84 @@ pub fn set_workspace_default(app: &AppHandle, workspace: &str, profile_id: &str)
 mod tests {
     use super::*;
     use crate::models::CustomToolConfiguration;
+
+    #[test]
+    fn mcp_migration_validation_snapshot_and_conflicts() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert!(legacy.mcp_servers.is_empty());
+        let old = normalize(migrate(legacy)).unwrap();
+        let mut edited = old.clone();
+        let server = crate::models::McpServerConfiguration { id: "docs".into(), name: "Documents".into(), enabled: true, url: "https://example.com/mcp".into(), token_env: "MCP_TOKEN".into(), allow_private: false, allowed_tools: vec!["search".into()], };
+        edited.profiles[0].configuration.mcp_servers.push(server);
+        let updated = revise(normalize(edited).unwrap(), &old).unwrap();
+        assert!(updated.profiles[0].revision > old.profiles[0].revision);
+        assert!(snapshot(&old, "default").unwrap().configuration.mcp_servers.is_empty());
+        let config = snapshot(&updated, "default").unwrap().configuration;
+        let decoded: RuntimeConfiguration = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(decoded, config);
+        for endpoint in ["", "file:///tmp", "https://user:pass@example.com/mcp", "https://example.com/mcp?token=x", "https://example.com/mcp#x"] {
+            let mut invalid = config.clone(); invalid.mcp_servers[0].url = endpoint.into();
+            assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        }
+        let mut invalid = config.clone(); invalid.mcp_servers[0].token_env = "raw token".into();
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        let mut invalid = config.clone(); invalid.mcp_servers.push(config.mcp_servers[0].clone());
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        let mut conflict = updated;
+        conflict.tools.push(CustomToolConfiguration { id: "mcp-tool".into(), name: "mcp_call_tool".into(), command: "echo legacy".into(), ..Default::default() });
+        conflict.profiles[0].custom_tool_ids.push("mcp-tool".into());
+        assert!(normalize(conflict.clone()).is_err());
+        conflict.profiles[0].configuration.mcp_servers[0].enabled = false;
+        assert!(normalize(conflict).is_ok());
+    }
+
+    #[test]
+    fn web_configuration_defaults_roundtrips_and_detects_conflicts() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.web.search_enabled && !legacy.web.fetch_enabled);
+        let mut config = legacy;
+        config.web.fetch_enabled = true;
+        config.web.search_enabled = true;
+        let catalog = normalize(migrate(config)).unwrap();
+        let saved = snapshot(&catalog, "default").unwrap();
+        assert!(saved.configuration.web.search_enabled);
+        let mut invalid = saved.configuration.clone();
+        invalid.web.api_key_env = "secret value".into();
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        let mut conflict = saved.configuration;
+        conflict.custom_tools.push(CustomToolConfiguration { id: "old-search".into(), name: "web_search".into(), command: "echo old".into(), ..Default::default() });
+        assert!(storage::normalize_runtime_configuration(conflict.clone()).is_err());
+        conflict.web.search_enabled = false;
+        assert!(storage::normalize_runtime_configuration(conflict).is_ok());
+        let mut shared = catalog;
+        shared.tools.push(CustomToolConfiguration { id: "shared-search".into(), name: "web_search".into(), command: "echo old".into(), ..Default::default() });
+        shared.profiles[0].custom_tool_ids.push("shared-search".into());
+        assert!(normalize(shared.clone()).is_err());
+        shared.profiles[0].configuration.web.search_enabled = false;
+        assert!(normalize(shared).is_ok());
+    }
+
+    #[test]
+    fn searxng_configuration_validates_endpoints_and_preserves_snapshots() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.web.provider, "brave");
+        assert!(!legacy.web.allow_private_search);
+        let catalog = normalize(migrate(legacy)).unwrap();
+        let old = snapshot(&catalog, "default").unwrap();
+        let mut edited = catalog.clone();
+        let web = &mut edited.profiles[0].configuration.web;
+        web.provider = "searxng".into(); web.search_enabled = true;
+        web.searxng_url = "http://127.0.0.1:8080/search".into(); web.allow_private_search = true;
+        let updated = revise(edited, &catalog).unwrap();
+        assert_eq!(old.configuration.web.provider, "brave");
+        assert!(updated.profiles[0].revision > catalog.profiles[0].revision);
+        let decoded: RuntimeConfiguration = serde_json::from_str(&serde_json::to_string(&updated.profiles[0].configuration).unwrap()).unwrap();
+        assert!(decoded.web.allow_private_search);
+        for url in ["", "file:///tmp", "http://user:pass@example.com/search", "https://example.com/search?key=x", "https://example.com/#x"] {
+            let mut invalid = decoded.clone(); invalid.web.searxng_url = url.into();
+            assert!(storage::normalize_runtime_configuration(invalid).is_err());
+        }
+    }
 
     #[test]
     fn migration_preserves_selection_and_snapshot_isolation() {
@@ -283,5 +372,47 @@ mod tests {
         let mut invalid = RuntimeConfiguration::default();
         invalid.compaction.reserve_tokens = 0;
         assert!(storage::normalize_runtime_configuration(invalid).is_err());
+    }
+
+    #[test]
+    fn skill_selection_is_optional_validated_and_snapshot_scoped() {
+        let legacy: RuntimeConfiguration = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.enabled_skills, None);
+        assert!(!legacy.skill_install_enabled);
+        let catalog = migrate(RuntimeConfiguration::default());
+        let captured = snapshot(&catalog, "default").unwrap();
+        let mut edited = catalog.clone();
+        edited.profiles[0].configuration.skills_enabled = true;
+        edited.profiles[0].configuration.skill_install_enabled = true;
+        edited.profiles[0].configuration.enabled_skills = Some(vec!["source-review".into()]);
+        let changed = revise(edited, &catalog).unwrap();
+        assert_eq!(captured.configuration.enabled_skills, None);
+        assert!(!captured.configuration.skill_install_enabled);
+        assert_eq!(changed.profiles[0].revision, catalog.profiles[0].revision + 1);
+        let encoded = serde_json::to_string(&changed.profiles[0].configuration).unwrap();
+        let decoded: RuntimeConfiguration = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.enabled_skills, Some(vec!["source-review".into()]));
+        assert!(decoded.skill_install_enabled);
+        let mut invalid = decoded;
+        invalid.enabled_skills = Some(vec!["../escape".into()]);
+        assert!(storage::normalize_runtime_configuration(invalid).is_err());
+    }
+
+    #[test]
+    fn skill_management_preserves_legacy_tools_and_rejects_enabled_name_conflicts() {
+        for name in ["list_installed_skills", "inspect_github_skill", "install_github_skill"] {
+            let tool = CustomToolConfiguration { id: "legacy-skill".into(), name: name.into(), command: "echo legacy".into(), ..Default::default() };
+            let mut config = RuntimeConfiguration::default();
+            config.custom_tools.push(tool.clone());
+            assert!(storage::normalize_runtime_configuration(config.clone()).is_ok());
+            config.skill_install_enabled = true;
+            assert!(storage::normalize_runtime_configuration(config).is_err());
+            let mut catalog = migrate(RuntimeConfiguration::default());
+            catalog.tools.push(tool);
+            catalog.profiles[0].custom_tool_ids.push("legacy-skill".into());
+            assert!(normalize(catalog.clone()).is_ok());
+            catalog.profiles[0].configuration.skill_install_enabled = true;
+            assert!(normalize(catalog).is_err());
+        }
     }
 }

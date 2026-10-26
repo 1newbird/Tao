@@ -10,7 +10,7 @@ import { runWindowsSandbox, windowsPath } from "./windows-sandbox.mjs";
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const worker = readFileSync(new URL("./sandbox-worker.mjs", import.meta.url), "utf8");
-export const SANDBOX_IMAGE = "node:22-bookworm-slim";
+export const SANDBOX_IMAGE = "tao-runtime:0.1.0";
 
 export function runProcess(program, args, { cwd, env, signal, input, onData, allowFailure = false, windowsVerbatimArguments = false } = {}) {
   signal?.throwIfAborted();

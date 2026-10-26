@@ -9,6 +9,8 @@ import { pathToFileURL } from "node:url";
 import { collaborationDecision } from "./collaboration-fixture.mjs";
 import { taskBoardDecision } from "./task-board-fixture.mjs";
 import { windowsTeamDecision } from "./windows-team-fixture.mjs";
+import { pdfFixture, docxFixture } from "./document-fixtures.mjs";
+import { githubFixture, COMMIT as SKILL_COMMIT } from "./skill-install-fixture.mjs";
 
 const root = resolve(process.cwd());
 const resourceArgument = process.argv.indexOf("--resource-root");
@@ -24,6 +26,9 @@ const workspaceB = join(tempRoot, "workspace-b");
 let activeGatewayRequests = 0;
 let maxConcurrentGatewayRequests = 0;
 const gatewayRequests = [];
+const searxRequests = [];
+const mcpRequests = [];
+const githubNetwork = githubFixture();
 const retryFailures = new Map();
 
 function assert(condition, message) {
@@ -80,6 +85,31 @@ function messageText(content) {
 
 async function createGateway() {
   const server = createServer(async (request, response) => {
+    if (request.url?.startsWith("/github/")) {
+      const target = new URL(`https://${request.url.slice(8)}`);
+      const result = await githubNetwork.request(target, { headers: request.headers });
+      response.writeHead(result.status, { "Content-Type": "application/octet-stream" }); response.end(result.body); return;
+    }
+    if (request.url === "/mcp") {
+      let raw = "";
+      for await (const chunk of request) raw += chunk;
+      const message = raw ? JSON.parse(raw) : {};
+      mcpRequests.push(message.method ?? request.method);
+      if (request.method === "DELETE") { response.writeHead(204).end(); return; }
+      if (message.id === undefined) { response.writeHead(202).end(); return; }
+      const result = message.method === "initialize" ? { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+        : message.method === "tools/list" ? { tools: [{ name: "echo", description: "MCP fixture echo", inputSchema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false } }] }
+        : { content: [{ type: "text", text: `MCP_RUNTIME_RESULT ${message.params.arguments.value}` }] };
+      response.writeHead(200, { "Content-Type": "application/json", "Mcp-Session-Id": "fixture-session" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result })); return;
+    }
+    if (request.method === "GET" && request.url.startsWith("/searx/search?")) {
+      const query = new URL(request.url, "http://localhost");
+      searxRequests.push(query.searchParams.get("q"));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ results: [{ title: "Example source", url: "https://example.com/", content: "SEARX_RUNTIME_SOURCE" }] }));
+      return;
+    }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404).end();
       return;
@@ -175,6 +205,41 @@ async function createGateway() {
         else if (!waited) writeSse(response, toolCallChunk("wait_agent", JSON.stringify({ agentIds: [spawned.agentId], mode: "all", timeoutMs: 5000 }), requestId));
         else writeSse(response, terminalChunk("默认成员流程完成。", requestId));
         writeSse(response, terminalChunk("", requestId, waited ? "stop" : "tool_calls"));
+      } else if (userText.includes("TAO_SKILL_INSTALL")) {
+        const step = toolMessages.length;
+        const parsed = toolMessages.map((message) => { try { return JSON.parse(messageText(message.content)); } catch { return {}; } });
+        const preview = parsed.find((result) => result.previewId);
+        if (step === 0) writeSse(response, toolCallChunk("read_tao_doc", JSON.stringify({ topic: "skill_install" }), requestId));
+        else if (step === 1) writeSse(response, toolCallChunk("inspect_github_skill", JSON.stringify({ url: "https://github.com/example/skills" }), requestId));
+        else if (step === 2) writeSse(response, toolCallChunk("install_github_skill", JSON.stringify({ previewId: preview?.previewId ?? "invalid" }), requestId));
+        else if (step === 3) writeSse(response, toolCallChunk("list_installed_skills", "{}", requestId));
+        else writeSse(response, terminalChunk("技能安装流程结束；是否成功以工具回执为准，新会话启用后使用。", requestId));
+        writeSse(response, terminalChunk("", requestId, step < 4 ? "tool_calls" : "stop"));
+      } else if (userText.includes("TAO_DOCUMENT_FLOW")) {
+        const step = toolMessages.length;
+        if (step === 0) writeSse(response, toolCallChunk("read", JSON.stringify({ path: "document.pdf", startPage: 2, pageCount: 1 }), requestId));
+        else if (step === 1) writeSse(response, toolCallChunk("read", JSON.stringify({ path: "document.docx", offset: 1, limit: 10 }), requestId));
+        else writeSse(response, terminalChunk("文档读取流程完成，引用 PDF 第 2 页与 DOCX 正文。", requestId));
+        writeSse(response, terminalChunk("", requestId, step < 2 ? "tool_calls" : "stop"));
+      } else if (userText.includes("TAO_MCP_FLOW")) {
+        const step = toolMessages.length;
+        if (step === 0) writeSse(response, toolCallChunk("mcp_list_tools", JSON.stringify({ server: "fixture" }), requestId));
+        else if (step === 1) writeSse(response, toolCallChunk("mcp_call_tool", JSON.stringify({ server: "fixture", tool: "echo", arguments: { value: "evidence" } }), requestId));
+        else writeSse(response, terminalChunk("MCP 模拟工具调用完成。", requestId));
+        writeSse(response, terminalChunk("", requestId, step < 2 ? "tool_calls" : "stop"));
+      } else if (userText.includes("TAO_SEARX_FLOW")) {
+        if (!hasToolResult) {
+          writeSse(response, toolCallChunk("web_search", JSON.stringify({ query: "Runtime search verification", freshness: "pd" }), requestId));
+          writeSse(response, terminalChunk("", requestId, "tool_calls"));
+        } else {
+          const result = JSON.parse(messageText(toolMessages.at(-1).content));
+          writeSse(response, terminalChunk(`搜索来源：[${result.results[0].title}](${result.results[0].url})。此处为模拟检索摘要，尚未读取正文。`, requestId));
+          writeSse(response, terminalChunk("", requestId));
+        }
+      } else if (userText.includes("TAO_WEB_") && !hasToolResult) {
+        const search = userText.includes("TAO_WEB_SEARCH");
+        writeSse(response, toolCallChunk(search ? "web_search" : "web_fetch", JSON.stringify(search ? { query: "fixture" } : { url: "http://127.0.0.1/private" }), requestId));
+        writeSse(response, terminalChunk("", requestId, "tool_calls"));
       } else if (isDocsRequest && !hasToolResult) {
         writeSse(response, toolCallChunk("read_tao_doc", JSON.stringify({ topic: "permissions" }), requestId));
         writeSse(response, terminalChunk("", requestId, "tool_calls"));
@@ -293,6 +358,7 @@ async function startRuntime() {
   const child = spawn(process.execPath, [
     "--require", preflight,
     "--import", loader,
+    "--import", pathToFileURL(join(root, "scripts", "skill-install-network-fixture.mjs")).href,
     runtimeScript,
     "--pi-root", piRoot,
     "--tao-home", taoHome,
@@ -306,6 +372,7 @@ async function startRuntime() {
       TSX_TSCONFIG_PATH: join(piRoot, "tsconfig.json"),
       NO_COLOR: "1",
       FORCE_COLOR: "0",
+      TAO_TEST_GITHUB_ORIGIN: new URL(baseUrl).origin,
     },
   });
 
@@ -322,7 +389,7 @@ async function startRuntime() {
       events.push(message.payload);
       if (message.payload.category === "permission" && message.payload.event === "requested" && !["team-permission-stop", "collaboration-permission"].includes(message.payload.conversationId)) {
         // This local fixture deliberately approves the requested test actions.
-        child.stdin.write(`${JSON.stringify({ id: `permission-${message.payload.permissionId}`, type: "permission_response", conversationId: message.payload.conversationId, permissionId: message.payload.permissionId, decision: "allow_once" })}\n`);
+        child.stdin.write(`${JSON.stringify({ id: `permission-${message.payload.permissionId}`, type: "permission_response", conversationId: message.payload.conversationId, permissionId: message.payload.permissionId, decision: message.payload.conversationId === "skill-install-rejected" && message.payload.tool === "install_github_skill" ? "deny" : "allow_once" })}\n`);
       }
     }
     if (message.type === "response") {
@@ -406,7 +473,91 @@ try {
   runtime = await startRuntime();
   await runtime.waitForReady();
 
+  const capabilityInspection = await runtime.request({ type: "inspect_web_capabilities", runtimeConfiguration: { web: { searchEnabled: false, fetchEnabled: true } } });
+  assert(capabilityInspection.search.state === "disabled" && capabilityInspection.fetch.state === "enabled", "联网能力检查没有区分搜索与网页读取");
+  const deniedInspection = await runtime.request({ type: "inspect_web_capabilities", runtimeConfiguration: { web: { searchEnabled: true, fetchEnabled: true }, execution: { backend: "docker", network: "inherit" } } });
+  assert(deniedInspection.search.state === "blocked" && deniedInspection.fetch.state === "blocked" && gatewayRequests.length === 0, "能力检查应遵循网络默认值且不调用模型");
+
   const profile = (systemPrompt, enabledTools, customTools = [], toolPermissions = {}) => ({ enabled: true, systemPromptMode: "replace", systemPrompt, conversationPrompt: "", toolMode: "custom", enabledTools, customTools, toolPermissions });
+  const installConfig = { ...profile("Skill installation test", []), skillInstallEnabled: true, skillsEnabled: true };
+  const installPreview = await runtime.request({ type: "preview_context", runtimeConfiguration: installConfig });
+  assert(installPreview.tools.some((tool) => tool.name === "install_github_skill"), "安装工具未注册");
+  const disabledInstallPreview = await runtime.request({ type: "preview_context", runtimeConfiguration: { ...installConfig, skillInstallEnabled: false } });
+  assert(!disabledInstallPreview.tools.some((tool) => tool.name === "install_github_skill"), "旧配置默认暴露安装工具");
+  await runtime.request({ ...prompt("skill-install-rejected", "skill-reject-1", "TAO_SKILL_INSTALL", workspaceA), permissionMode: "full_access", runtimeConfiguration: installConfig });
+  assert(!existsSync(join(taoHome, "skills", "github-sample")), "拒绝后仍安装了技能");
+  await runtime.request({ ...prompt("skill-install-denied", "skill-deny-1", "TAO_SKILL_INSTALL", workspaceA), permissionMode: "full_access", runtimeConfiguration: { ...installConfig, toolPermissions: { install_github_skill: { mode: "deny" } } } });
+  assert(!existsSync(join(taoHome, "skills", "github-sample")), "完全访问绕过技能安装禁止规则");
+  await runtime.request({ ...prompt("skill-install-flow", "skill-install-1", "TAO_SKILL_INSTALL", workspaceA), permissionMode: "full_access", runtimeConfiguration: installConfig });
+  assert(JSON.parse(await readFile(join(taoHome, "skills", "github-sample", ".tao-source.json"), "utf8")).commit === SKILL_COMMIT, "安装来源未持久保存");
+  assert(runtime.events.some((event) => event.conversationId === "skill-install-flow" && event.category === "permission" && event.event === "requested" && event.permissionCommand?.includes(SKILL_COMMIT) && event.permissionCommand?.includes("github-sample")), "完全访问下未确认技能名称与固定提交");
+  const sameChatSkills = await runtime.request({ type: "list_skills", conversationId: "skill-install-flow", runtimeConfiguration: installConfig });
+  assert(!sameChatSkills.skills.some((skill) => skill.name === "github-sample"), "安装后不应热加载当前会话");
+  const newChatSkills = await runtime.request({ type: "list_skills", conversationId: "skill-install-new", runtimeConfiguration: installConfig });
+  assert(newChatSkills.skills.some((skill) => skill.name === "github-sample"), "新会话没有发现已安装技能");
+  await writeFile(join(workspaceA, "document.pdf"), pdfFixture());
+  await writeFile(join(workspaceA, "document.docx"), docxFixture());
+  const documentConfiguration = profile("Document test", ["read"]);
+  const documentPreview = await runtime.request({ type: "preview_context", runtimeConfiguration: documentConfiguration });
+  assert(JSON.stringify(documentPreview).includes("pageCount"), "文档参数没有进入上下文预览");
+  const documentAttachments = [{ path: join(workspaceA, "document.pdf"), name: "document.pdf", extension: "pdf", size: 100 }];
+  await runtime.request({ ...prompt("document-flow", "document-1", "TAO_DOCUMENT_FLOW", workspaceA), attachments: documentAttachments, runtimeConfiguration: documentConfiguration });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_DOCUMENT_FLOW") && request.userText.includes("startPage/pageCount") && request.toolResultText.includes("Second page evidence") && request.toolResultText.includes("文档测试 & Tao")), "文档附件或正文没有经过 Runtime 工具链返回模型");
+  await runtime.request({ ...prompt("document-denied", "document-2", "TAO_DOCUMENT_FLOW DENIED", workspaceA), permissionMode: "full_access", runtimeConfiguration: { ...documentConfiguration, toolPermissions: { read: { mode: "deny" } } } });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_DOCUMENT_FLOW DENIED") && request.toolResultText.includes("禁止") && !request.toolResultText.includes("Second page evidence")), "文档读取绕过 read 禁止规则");
+  const mcpConfiguration = { ...profile("MCP test", []), execution: { network: "allow", allowedHosts: ["127.0.0.1"] }, mcpServers: [{ id: "fixture", name: "MCP Fixture", enabled: true, url: `${new URL(baseUrl).origin}/mcp`, tokenEnv: "", allowPrivate: true, allowedTools: ["echo"] }] };
+  const mcpList = await runtime.request({ type: "test_mcp_connection", runtimeConfiguration: mcpConfiguration, serverId: "fixture" });
+  assert(mcpList.tools[0].name === "echo", "MCP 连接测试没有返回工具清单");
+  assert(!mcpRequests.includes("tools/call"), "MCP 连接测试执行了远程工具");
+  const mcpTemplate = await runtime.request({ type: "preview_context", runtimeConfiguration: mcpConfiguration });
+  assert(mcpTemplate.tools.some((tool) => tool.name === "mcp_call_tool"), "MCP 工具未进入上下文预览");
+  await runtime.request({ ...prompt("mcp-flow", "mcp-1", "TAO_MCP_FLOW", workspaceA), permissionMode: "ask", runtimeConfiguration: mcpConfiguration });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_MCP_FLOW") && request.toolResultText.includes("MCP_RUNTIME_RESULT evidence")), "MCP 结果未经过工具链返回模型");
+  assert(runtime.events.some((event) => event.conversationId === "mcp-flow" && event.category === "permission" && event.event === "requested" && event.permissionCommand?.includes("evidence") && event.permissionTarget?.includes("MCP Fixture")), "MCP 确认缺少服务和参数预览");
+  const callCount = mcpRequests.filter((method) => method === "tools/call").length;
+  assert(callCount === 1, "MCP 工具发生重复调用");
+  await runtime.request({ ...prompt("mcp-denied", "mcp-2", "TAO_MCP_FLOW DENIED", workspaceA), permissionMode: "full_access", runtimeConfiguration: { ...mcpConfiguration, toolPermissions: { mcp_call_tool: { mode: "deny" } } } });
+  assert(mcpRequests.filter((method) => method === "tools/call").length === callCount, "完全访问绕过了 MCP 禁止规则");
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_MCP_FLOW DENIED") && request.toolResultText.includes("禁止")), "MCP 拒绝未返回模型");
+  const skillSource = join(tempRoot, "skill-source");
+  await mkdir(skillSource);
+  await writeFile(join(skillSource, "SKILL.md"), "---\nname: source-review\ndescription: SKILL_AUTO_METADATA\n---\nSKILL_BODY_EVIDENCE\n");
+  await runtime.request({ type: "import_skill", directory: skillSource });
+  await writeFile(join(skillSource, "SKILL.md"), "---\nname: manual-report\ndescription: SKILL_MANUAL_METADATA\ndisable-model-invocation: true\n---\nSKILL_MANUAL_BODY\n");
+  await runtime.request({ type: "import_skill", directory: skillSource });
+  const skillConfiguration = { ...profile("Skills test", ["read"]), systemPromptMode: "append", skillsEnabled: true, enabledSkills: ["source-review", "manual-report"] };
+  const skillList = await runtime.request({ type: "list_skills", conversationId: "skills-test", runtimeConfiguration: skillConfiguration });
+  assert(skillList.skills.length === 2, "导入技能未进入清单");
+  await runtime.request({ ...prompt("skills-test", "skills-1", "组合测试 Skills 自动目录", workspaceA), runtimeConfiguration: skillConfiguration });
+  const skillRequest = gatewayRequests.at(-1);
+  assert(skillRequest.systemText.includes("SKILL_AUTO_METADATA") && !skillRequest.systemText.includes("SKILL_MANUAL_METADATA"), "自动技能目录未遵循手动调用标记");
+  await runtime.request({ ...prompt("skills-manual", "skills-2", "/skill:manual-report 组合测试 Skills 显式调用", workspaceA), runtimeConfiguration: { ...skillConfiguration, enabledTools: [], enabledSkills: ["manual-report"], execution: { fileScope: "workspace" } } });
+  assert(gatewayRequests.at(-1).userText.includes("SKILL_MANUAL_BODY") && !gatewayRequests.at(-1).systemText.includes("SKILL_AUTO_METADATA"), "显式调用未复用内核展开或选择过滤失效");
+  // A running session reports its actual catalog, not newly installed files.
+  await writeFile(join(skillSource, "SKILL.md"), "---\nname: later-import\ndescription: Imported later\n---\nLater\n");
+  await runtime.request({ type: "import_skill", directory: skillSource });
+  const loadedSkills = await runtime.request({ type: "list_skills", conversationId: "skills-test", runtimeConfiguration: { ...skillConfiguration, enabledSkills: null } });
+  assert(loadedSkills.skills.length === 2, "已加载会话错误显示新导入技能");
+  const webProfile = { ...profile("web test", []), web: { searchEnabled: true, fetchEnabled: true, apiKeyEnv: "TAO_TEST_MISSING_SEARCH_KEY" }, execution: { allowedEnv: ["TAO_TEST_MISSING_SEARCH_KEY"] } };
+  const webTemplate = await runtime.request({ type: "preview_context", runtimeConfiguration: webProfile });
+  const searxConfig = { ...webProfile, execution: { network: "allow", allowedHosts: ["127.0.0.1"] }, web: { searchEnabled: true, fetchEnabled: true, provider: "searxng", searxngUrl: `${new URL(baseUrl).origin}/searx/search`, allowPrivateSearch: true } };
+  const testedSearch = await runtime.request({ type: "test_web_search", runtimeConfiguration: searxConfig });
+  assert(testedSearch.provider === "SearXNG" && testedSearch.resultCount === 1, "Runtime 搜索连接测试未使用 SearXNG");
+  const searxResult = await runtime.request({ ...prompt("searx-flow", "searx-1", "TAO_SEARX_FLOW", workspaceA), permissionMode: "full_access", runtimeConfiguration: searxConfig });
+  assert(searxResult.messages.some((message) => message.content.includes("[Example source](https://example.com/)")), "SearXNG 结果没有进入回答引用");
+  assert(searxRequests.includes("Runtime search verification"), "模型搜索请求没有发送到配置接口");
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_SEARX_FLOW") && request.toolResultText.includes("SEARX_RUNTIME_SOURCE") && request.toolDescriptions.web_search.includes("SearXNG")), "SearXNG 定义或结果未到达模型");
+  const deniedSearch = await runtime.request({ type: "test_web_search", runtimeConfiguration: { ...searxConfig, toolPermissions: { web_search: { mode: "deny" } } } }).then(() => "").catch(String);
+  assert(deniedSearch.includes("禁止"), "连接测试绕过禁止规则");
+  assert(webTemplate.tools.some((tool) => tool.name === "web_search") && webTemplate.tools.some((tool) => tool.name === "web_fetch"), "联网工具未进入上下文预览");
+  await runtime.request({ ...prompt("web-search-missing", "web-search-1", "TAO_WEB_SEARCH 组合测试", workspaceA), permissionMode: "full_access", runtimeConfiguration: webProfile });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_WEB_SEARCH") && request.toolResultText.includes("尚未配置搜索密钥")), "搜索缺少凭据未通过真实工具链返回明确错误");
+  await runtime.request({ ...prompt("web-fetch-private", "web-fetch-1", "TAO_WEB_FETCH 组合测试", workspaceA), permissionMode: "full_access", runtimeConfiguration: webProfile });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_WEB_FETCH") && request.toolResultText.includes("公开互联网")), "网页工具未阻止本机地址");
+  await runtime.request({ ...prompt("web-denied", "web-denied-1", "TAO_WEB_FETCH_DENIED 组合测试", workspaceA), permissionMode: "full_access", runtimeConfiguration: { ...webProfile, execution: { network: "deny" } } });
+  assert(gatewayRequests.some((request) => request.userText.includes("TAO_WEB_FETCH_DENIED") && request.toolResultText.includes("禁止工具联网")), "完全访问绕过了联网限制");
+  assert(runtime.events.some((event) => event.conversationId === "web-search-missing" && event.category === "tool" && event.event === "started" && event.action === "search_web" && event.text.includes("fixture")), "搜索过程缺少查询词与动作记录");
+  assert(runtime.events.some((event) => event.conversationId === "web-fetch-private" && event.category === "tool" && event.event === "started" && event.action === "read_webpage"), "网页读取过程缺少动作记录");
   const alpha = { ...prompt("profile-alpha", "profile-alpha-1", "组合测试 Alpha", workspaceA), runtimeConfiguration: profile("ALPHA_PROFILE_ONLY", ["read"]) };
   const beta = { ...prompt("profile-beta", "profile-beta-1", "组合测试 Beta", workspaceB), runtimeConfiguration: profile("BETA_PROFILE_ONLY", []) };
   await Promise.all([runtime.request(alpha), runtime.request(beta)]);
@@ -864,6 +1015,12 @@ try {
     coordinationToolsAutoRegisteredVerified: true,
     defaultWorkerAndLazyTeamVerified: true,
     builtinDocumentationLookupVerified: true,
+    webToolsRegistrationAndFailureFlowVerified: true,
+    searxngRuntimeSearchConnectionAndCitationVerified: true,
+    mcpRuntimeDiscoveryCallAndDenyVerified: true,
+    documentRuntimeReadAndDenyVerified: true,
+    githubSkillInstallConfirmationAndNewChatVerified: true,
+    skillsImportSelectionAndInvocationVerified: true,
     customCompactionThresholdAndInstructionsVerified: true,
     automaticCompactionDisabledVerified: true,
     ...(process.argv.includes("--docker") ? { dockerSdkToolFlowVerified: true } : {}),

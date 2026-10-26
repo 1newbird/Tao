@@ -109,8 +109,47 @@ pub fn save_runtime_configuration(
 }
 
 pub(crate) fn normalize_runtime_configuration(
-    configuration: RuntimeConfiguration,
+    mut configuration: RuntimeConfiguration,
 ) -> Result<RuntimeConfiguration, String> {
+    if configuration.mcp_servers.len() > 20 { return Err("MCP 服务最多配置 20 个".into()); }
+    let mut mcp_ids = std::collections::HashSet::new();
+    for server in &mut configuration.mcp_servers {
+        server.name = server.name.trim().to_string();
+        if server.id.is_empty() || server.id.len() > 64 || !server.id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) || !mcp_ids.insert(server.id.clone())
+            || server.name.is_empty() || server.name.chars().count() > 100 { return Err("MCP 服务 ID 或名称无效/重复".into()); }
+        let endpoint = server.url.trim();
+        let url = tauri::Url::parse(endpoint).map_err(|_| "MCP 接口地址无效")?;
+        if endpoint.len() > 2048 || !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            return Err("MCP 地址须为完整 HTTP/HTTPS 接口，不含登录凭据、查询参数或片段".into());
+        }
+        server.url = url.to_string();
+        if !server.token_env.is_empty() && (server.token_env.len() > 80 || !server.token_env.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') || !server.token_env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+            return Err("MCP 凭据只填写环境变量名称".into());
+        }
+        if server.allowed_tools.len() > 100 || server.allowed_tools.iter().any(|name| name.is_empty() || name.len() > 128 || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))) { return Err("MCP 工具名称无效或超过 100 项".into()); }
+        let mut seen = std::collections::HashSet::new();
+        server.allowed_tools.retain(|name| seen.insert(name.clone()));
+    }
+    if !matches!(configuration.web.provider.as_str(), "brave" | "searxng") { return Err("搜索来源无效".into()); }
+    let endpoint = configuration.web.searxng_url.trim();
+    if !endpoint.is_empty() {
+        let url = tauri::Url::parse(endpoint).map_err(|_| "SearXNG 搜索接口地址无效")?;
+        if endpoint.len() > 2048 || !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            return Err("SearXNG 地址须为完整 HTTP/HTTPS 接口地址，不含登录凭据、查询参数或片段".into());
+        }
+        configuration.web.searxng_url = url.to_string();
+    } else {
+        configuration.web.searxng_url.clear();
+        if configuration.web.search_enabled && configuration.web.provider == "searxng" { return Err("请填写 SearXNG 搜索接口地址（含 /search）".into()); }
+    }
+    let key_env = &configuration.web.api_key_env;
+    if configuration.enabled_skills.as_ref().is_some_and(|names| names.len() > 500 || names.iter().any(|name| name.is_empty() || name.len() > 64 || name.starts_with('-') || name.ends_with('-') || name.contains("--") || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))) {
+        return Err("技能选择包含无效名称或超过 500 项".into());
+    }
+    if key_env.is_empty() || key_env.len() > 80 || !key_env.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        || !key_env.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("搜索密钥请填写有效环境变量名称，不要填写密钥本身".into());
+    }
     let execution = &configuration.execution;
     if !matches!(execution.backend.as_str(), "local" | "docker" | "windows") || !matches!(execution.file_scope.as_str(), "any" | "workspace")
         || !matches!(execution.workspace_access.as_str(), "read_write" | "read_only") || !matches!(execution.network.as_str(), "inherit" | "allow" | "deny")
@@ -214,6 +253,16 @@ pub(crate) fn normalize_runtime_configuration(
         ) {
             return Err(format!("自定义工具不能使用内置工具名称：{}", tool.name));
         }
+        if (tool.name == "web_search" && configuration.web.search_enabled)
+            || (tool.name == "web_fetch" && configuration.web.fetch_enabled) {
+            return Err(format!("请先重命名同名自定义工具，再启用联网能力：{}", tool.name));
+        }
+        if matches!(tool.name.as_str(), "mcp_list_tools" | "mcp_call_tool") && configuration.mcp_servers.iter().any(|server| server.enabled) {
+            return Err("请先重命名同名自定义工具，再启用 MCP".into());
+        }
+        if matches!(tool.name.as_str(), "list_installed_skills" | "inspect_github_skill" | "install_github_skill") && configuration.skill_install_enabled {
+            return Err("请先重命名同名自定义工具，再启用对话技能管理".into());
+        }
         if tool.description.len() > 2_000 {
             return Err("自定义工具描述不能超过 2000 个字符".to_string());
         }
@@ -258,12 +307,16 @@ pub(crate) fn normalize_runtime_configuration(
         tool_mode: configuration.tool_mode,
         enabled_tools,
         skills_enabled: configuration.skills_enabled,
+        skill_install_enabled: configuration.skill_install_enabled,
+        enabled_skills: configuration.enabled_skills,
         extensions_enabled: configuration.extensions_enabled,
         custom_tools,
         tool_permissions,
         delegation: configuration.delegation,
         execution: configuration.execution,
         compaction: configuration.compaction,
+        web: configuration.web,
+        mcp_servers: configuration.mcp_servers,
     })
 }
 

@@ -16,10 +16,16 @@ function NameList({ label, value, placeholder, onChange }: { label: string; valu
 export function ExecutionSettings({ value, onChange }: { value?: ExecutionConfiguration; onChange: (value: ExecutionConfiguration) => void }) {
   const policy = { ...defaultExecution(), ...value };
   const [checking, setChecking] = useState(false);
+  const [preparingDocker, setPreparingDocker] = useState(false);
+  const [preparedImage, setPreparedImage] = useState<{ image: string; message: string } | null>(null);
   const [status, setStatus] = useState("");
   const [nativeWorkspace, setNativeWorkspace] = useState("");
   const currentImage = useRef(policy.image);
   const currentBackend = useRef(policy.backend);
+  const latestPolicy = useRef(policy);
+  const mounted = useRef(true);
+  latestPolicy.current = policy;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   currentBackend.current = policy.backend;
   currentImage.current = policy.image;
   useEffect(() => { setStatus("");setChecking(false); }, [policy.image, policy.backend]);
@@ -52,8 +58,14 @@ export function ExecutionSettings({ value, onChange }: { value?: ExecutionConfig
         {status && <p role="status" className="delegation-hint">{status}</p>}
       </>}
       {policy.backend === "docker" && <>
-        <label className="setting-field"><span>沙盒镜像</span><input value={policy.image} onChange={(event) => update({ image: event.currentTarget.value })} /><small>需要已安装 Docker Desktop、启用 Linux 容器，并提前准备包含 Node 22 的镜像。Tao 不自动拉取镜像，不可用时会报错。</small></label>
-        <button type="button" className="secondary-button compact-button" disabled={checking} onClick={() => {
+        <label className="setting-field"><span>沙盒镜像</span><input disabled={preparingDocker} value={policy.image} onChange={(event) => update({ image: event.currentTarget.value })} /><small>推荐 Tao 基础镜像：Node 22、Python、Git、rg、curl、jq、压缩工具及 C/C++ 构建工具。需先安装 Docker Desktop 并启用 Linux 容器；工具执行时不会自动拉取镜像。</small></label>
+        <button type="button" className="secondary-button compact-button" disabled={checking || preparingDocker} onClick={() => {
+          setPreparingDocker(true); setPreparedImage(null); setStatus("正在构建并验收 Tao 基础镜像，首次可能需要数分钟…");
+          void invoke<{ image: string; message: string }>("prepare_docker_image").then((result) => { if (mounted.current && currentBackend.current === "docker") { onChange({ ...latestPolicy.current, image: result.image }); setPreparedImage(result); setStatus(""); } }).catch((error) => { if (mounted.current && currentBackend.current === "docker") setStatus(`镜像准备失败：${String(error)}`); }).finally(() => { if (mounted.current) setPreparingDocker(false); });
+        }}>{preparingDocker ? "正在准备 Tao 镜像…" : "准备 Tao 基础镜像"}</button>
+        <p className="delegation-hint">点击后使用随包配方在本机构建，首次需要下载基础镜像和软件包，并占用磁盘空间。验收通过后选择 tao-runtime:0.1.0；失败保留旧镜像。浏览器、OCR 和项目依赖需另行准备。</p>
+        {preparedImage?.image === policy.image && <p className="connection-result success" role="status">{preparedImage.message}</p>}
+        <button type="button" className="secondary-button compact-button" disabled={checking || preparingDocker} onClick={() => {
           setChecking(true); const image = policy.image;
           void invoke<{ available: boolean; image: string; error: string | null }>("get_sandbox_status", { image }).then((result) => { if (currentImage.current === image && currentBackend.current === "docker") setStatus(result.available ? `Docker 与镜像可用：${result.image}` : `沙盒不可用：${result.error}`); }).catch((error) => { if (currentImage.current === image && currentBackend.current === "docker") setStatus(`检测失败：${String(error)}`); }).finally(() => {if(currentBackend.current === "docker")setChecking(false);});
         }}>{checking ? "正在检测…" : "检测沙盒环境"}</button>

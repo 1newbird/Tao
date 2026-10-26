@@ -261,6 +261,9 @@ try {
     Write-Step '安装 Tao 根目录依赖（npm ci）'
     & $npm ci
     Assert-ExitCode 'Tao 依赖安装'
+    Write-Step '安装 Tao Runtime 文档解析依赖'
+    & $npm ci --prefix src-tauri/runtime --ignore-scripts
+    Assert-ExitCode 'Tao Runtime 依赖安装'
     Push-Location (Join-Path $projectRoot 'vendor\pi')
     try {
         Write-Step '安装 Pi 固定快照依赖（npm ci --ignore-scripts）'

@@ -1,5 +1,7 @@
 # Tao Windows x64 打包发布
 
+当前版本为 0.3.0，最后核对于 2026-10-26，实际发布状态见[版本验收记录](../验证/2026-10-26-0.3.0发布验收.md)。新安装包编译和正式发布需用户授权；本文命令是操作说明，不触发重复构建或发布。
+
 ## 1. 当前支持的发布格式
 
 当前正式支持：
@@ -29,6 +31,7 @@
 - Rust stable 和 MSVC 工具链；
 - Visual Studio/Build Tools；
 - Tao 根目录依赖；
+- `src-tauri/runtime/node_modules` 文档解析依赖（`npm.cmd ci --prefix src-tauri/runtime --ignore-scripts`，保留 Windows x64 optional 依赖）；
 - `vendor/pi` 源码和 `vendor/pi/node_modules`；
 - 首次准备时可以访问 Node.js 和 NuGet 下载地址的网络。
 
@@ -115,7 +118,7 @@ NSIS 当前不作为默认方式，是因为 Pi 资源和 Node 运行时较大�
 ```text
 <Tao 项目根目录>\
 src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
-Tao_0.1.4_x64_en-US.msi
+Tao_0.3.0_x64_en-US.msi
 ```
 
 如果执行 `npm.cmd run tao:release -- 2.1`，文件名会变为：
@@ -149,7 +152,8 @@ src-tauri\resources\
 │  ├─ tao-runtime.mjs
 │  ├─ context.mjs
 │  ├─ prompt-policy.mjs
-│  └─ docs/                # 四个按需模型运行专题
+│  ├─ docker/              # Tao 基础镜像构建配方，不内嵌镜像
+│  └─ docs/                # 按需模型运行专题，含技能安装
 ├─ pi/
 │  ├─ packages/
 │  ├─ node_modules/
@@ -227,6 +231,8 @@ npm.cmd run tao:release -- 2.1
 
 ## 10. 当前发布验收状态
 
+0.3.0 的新增工具、Docker 镜像和实际 MSI 验收记录见[0.3.0 发布验收](../验证/2026-10-26-0.3.0发布验收.md)，功能和限制见[发布说明](../发布说明/0.3.0.md)。下方保留历史版本证据，不能替代新版验收。
+
 2026-10-21 本机 `0.2.0` 编译与验收：
 
 - 新增组合级执行权限、Docker/Windows 原生预览、压缩策略及长任务持久化；Windows 原生使用随包兼容 Node，不要求用户安装 Docker、Rust 或开发工具链。
@@ -236,6 +242,10 @@ npm.cmd run tao:release -- 2.1
 - 用户安装试用后反馈“一切正常”，已确认继续提交、push 和发布。UAC 点击取消、明确卸载、重启、Windows 10 与跨用户保留后续专项验收；原生后端仍标注预览。详细记录：[0.2.0 发布验收](../验证/2026-10-21-0.2.0发布验收.md)。
 - [v0.2.0 Release](https://github.com/1newbird/Tao/releases/tag/v0.2.0) 已正式发布并标记 Latest；源码提交/标签 `d9a280c` / `v0.2.0` 已推送。MSI 与 SHA-256 文件的 GitHub 摘要均与本地一致。
 
+### 历史发布记录（0.1.x）
+
+以下保留当时的文件、失败/待验收状态和发布结果，不代表当前待办或 Latest；旧 MSI 不再追查，当前状态以本节版本验收链接与开发 TODO 为准。
+
 2026-10-19 本机 `0.1.4` 编译与包资源验收：
 
 - 源码 `check`、UI 自动回归、完整 `test:agents` 通过；包含 46 项协调器、6 项上下文、12 项 Rust 测试以及实际 SDK + 本地模拟网关流程。
@@ -244,7 +254,7 @@ npm.cmd run tao:release -- 2.1
 - MSI 行政提取后，使用其实际 Node、Runtime 和内核通过双路径 ready/ping 及完整模拟网关回归；12 个关键文件与源文件/准备资源字节一致，exe 仅相差 Tauri 的 `UNK → MSI` 类型标记。未覆盖本机现有安装或用户数据。
 - [Tao_0.1.4_x64_en-US.msi](../../src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/Tao_0.1.4_x64_en-US.msi) 为 74.9 MiB（78,549,592 字节），SHA-256 `a7fba0b0fb18caeb6da36b005feec871113a9e0e6e7b2fdd8338e5a9e8bb0620`。与 0.1.3 使用相同 UpgradeCode、不同 ProductCode。
 - 用户已确认 0.1.4 试用效果正常并授权发布、push。真实模型质量、原生多窗口完整异常路径及干净 Windows 环境继续专项验收；行政提取和模拟网关不代替这些项目。
-- [v0.1.4 Release](https://github.com/1newbird/Tao/releases/tag/v0.1.4) 已正式发布并标记 Latest，源码提交/标签 `69eaa56` / `v0.1.4` 已推送。GitHub 侧两个附件的大小和 SHA-256 均与本地文件一致。
+- [v0.1.4 Release](https://github.com/1newbird/Tao/releases/tag/v0.1.4) 当时已正式发布并标记 Latest，源码提交/标签 `69eaa56` / `v0.1.4` 已推送。GitHub 侧两个附件的大小和 SHA-256 均与本地文件一致。
 
 2026-10-12 本机 `0.1.3` 后台窗口修复与打包验证：
 
@@ -271,10 +281,10 @@ npm.cmd run tao:release -- 2.1
 
 上述体积按 MiB（1 MiB = 1,048,576 字节）显示。实际安装包路径和 SHA-256 以发布命令输出及 `.tao-release-cache/release-report.json` 为准。
 
-仍待完成：
+### 当前仍待完成
 
 - 没有 Node.js 和 Tao 源码的干净 Windows x64 电脑安装；
-- 安装后的 Runtime 状态、完整问答、工具、权限、会话恢复与故障时删除会话验收；
+- Runtime 故障、权限等待、多窗口、明确卸载/实际升级及重启等安装后专项；0.2.0 整体安装试用已通过，详细缺口见 [开发 TODO](../开发TODO.md)；
 - 安装版 `bash` 工具对 Git Bash 的依赖检查；
 - NSIS 体积和耗时评估；
 - 代码签名。

@@ -1,0 +1,10 @@
+{
+  "name": "tao-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fflate": "0.8.3",
+    "pdfjs-dist": "6.4.299",
+    "saxes": "6.0.0"
+  }
+}

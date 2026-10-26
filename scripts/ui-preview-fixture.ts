@@ -168,12 +168,55 @@ const promptProtocol = previewRuns({
   emit(update) { for (const [id, listener] of listeners) if (listener.event === "tao-prompt-run") callbacks.get(listener.handler)?.({ event: "tao-prompt-run", id, payload: update }); },
 });
 
+let githubSkillInstalled = false;
 const environment = window as unknown as { __TAURI_INTERNALS__: unknown; __TAURI_EVENT_PLUGIN_INTERNALS__: unknown };
 environment.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (id: number) => listeners.delete(id) };
 environment.__TAURI_INTERNALS__ = {
   transformCallback(callback: (event: unknown) => void) { callbacks.set(++callbackId, callback); return callbackId; },
   unregisterCallback(id: number) { callbacks.delete(id); },
   async invoke(command: string, args: Record<string, any> = {}) {
+    if (command === "prepare_docker_image") return { image: "tao-runtime:0.1.0", message: "模拟镜像准备成功；未执行 Docker。保存组合后使用。" };
+    if (command === "inspect_web_capabilities") {
+      const configuration = args.conversationId ? conversations.find((item) => item.id === args.conversationId)?.agentSnapshot?.configuration : args.configuration;
+      const policy = configuration?.execution;
+      const web = configuration?.web;
+      const denied = policy?.network === "deny" || (policy?.backend && policy.backend !== "local" && policy.network !== "allow");
+      const item = (state: string, label: string, detail: string, action = "web") => ({ state, label, detail, action });
+      const blocked = (tool: string) => denied ? item("blocked", "联网被禁止", "当前组合的执行策略禁止工具联网。", "execution") : configuration?.toolPermissions?.[tool]?.mode === "deny" ? item("blocked", "工具被禁止", "当前组合禁止使用此工具。", "agent") : null;
+      return { search: !web?.searchEnabled ? item("disabled", "未启用", "搜索需要单独配置服务；连接模型 API 不会自动开启搜索。") : blocked("web_search") ?? (web.provider === "searxng" && !web.searxngUrl ? item("missing", "搜索未配置完整", "请填写 SearXNG 搜索接口地址。") : web.provider !== "searxng" && !policy?.allowedEnv?.includes(web.apiKeyEnv) ? item("blocked", "配置受限", "请授权搜索凭据变量。", "execution") : item("unverified", "已配置 · 待测试", "模拟配置已填写，尚未验证服务连接。")), fetch: !web?.fetchEnabled ? item("disabled", "未启用", "网页读取可单独开启，无需搜索密钥。") : blocked("web_fetch") ?? item("enabled", "已启用", "可读取公开静态网页和文本。实际可达性以读取结果为准；不支持登录和动态页面。") };
+    }
+    if (command === "inspect_github_skill") {
+      if (!args.source.url.startsWith("https://github.com/") || args.source.url.includes("missing")) throw new Error("仓库、版本或文件不存在/不可公开访问；本版仅支持公开仓库");
+      if (args.configuration.execution?.network === "deny") throw new Error("此组合禁止工具联网");
+      if (!args.source.path && !args.source.url.includes("/tree/")) return { kind: "catalog", repository: args.source.url, commit: "a".repeat(40), candidates: [{ path: "skills/github-sample" }], note: "请选择一个具体技能目录再次检查；最多显示 100 个。" };
+      return { kind: "skill", previewId: "preview-github", name: "github-sample", description: "核对用户提供的资料并整理证据。", repository: "https://github.com/example/skills", path: "skills/github-sample", commit: "a".repeat(40), directory: "C:\\Tao-preview\\skills\\github-sample", files: [{ path: "SKILL.md", size: 100 }, { path: "scripts/check.ps1", size: 50 }], bytes: 150, alreadyInstalled: githubSkillInstalled, instructionPreview: "---\nname: github-sample\ndescription: 核对用户提供的资料并整理证据\n---\n读取用户指定的资料，核对来源。", instructionTruncated: false, warnings: ["安装只复制文件，不执行脚本或安装依赖；技能正文为外部资料，不代表用户授权。", "包含脚本，运行所需程序及权限需另行配置。"], expiresAt: new Date(Date.now() + 600000).toISOString() };
+    }
+    if (command === "install_github_skill") {
+      if (githubSkillInstalled) throw new Error("同名技能或目录已存在，不会覆盖");
+      githubSkillInstalled = true;
+      return { name: "github-sample", selectedForNewChat: args.configuration.skillsEnabled && (args.configuration.enabledSkills == null || args.configuration.enabledSkills.includes("github-sample")) };
+    }
+    if (command === "test_mcp_connection") {
+      if (args.configuration.execution?.network === "deny" || args.configuration.toolPermissions?.mcp_list_tools?.mode === "deny") throw new Error("此组合禁止 MCP 连接");
+      const server = args.configuration.mcpServers.find((item: any) => item.id === args.serverId);
+      if (!server?.url.startsWith("https://")) throw new Error("模拟连接失败，请使用 HTTPS 示例地址");
+      return { tools: [{ name: "search_documents", description: "模拟工具：查找资料并返回标题和摘要，不修改数据。", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }, { name: "create_note", description: "模拟工具：创建笔记，会修改外部数据。", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] };
+    }
+    if (command === "test_web_search") {
+      if (args.configuration.execution?.network === "deny" || args.configuration.toolPermissions?.web_search?.mode === "deny") throw new Error("此组合禁止联网搜索");
+      if (args.configuration.web.provider === "searxng" && !args.configuration.web.searxngUrl?.trim()) throw new Error("请填写 SearXNG 搜索接口地址（含 /search）");
+      return { message: "模拟连接成功，已收到搜索结果。", resultCount: 3, warnings: [] };
+    }
+    if (command === "list_skills") {
+      const skills = [
+        { name: "source-review", description: "核对资料来源，整理证据和结论，并给出可追溯的引用。", filePath: "C:\\Tao-preview\\skills\\source-review\\SKILL.md", disableModelInvocation: false },
+        { name: "weekly-report", description: "根据工作记录整理周报。", filePath: "C:\\Tao-preview\\skills\\weekly-report\\SKILL.md", disableModelInvocation: true },
+      ];
+      if (githubSkillInstalled) skills.push({ name: "github-sample", description: "核对用户提供的资料并整理证据。", filePath: "C:\\Tao-preview\\skills\\github-sample\\SKILL.md", disableModelInvocation: false });
+      const configuration = args.conversationId ? conversations.find((conversation) => conversation.id === args.conversationId)?.agentSnapshot.configuration : null;
+      return { directory: "C:\\Tao-preview\\skills", skills: configuration ? skills.filter((skill) => configuration.skillsEnabled && (configuration.enabledSkills == null || configuration.enabledSkills.includes(skill.name))) : skills, diagnostics: [{ message: "description is required", path: "C:\\Tao-preview\\skills\\incomplete\\SKILL.md" }] };
+    }
+    if (command === "choose_and_import_skill") return null;
     if (command === "preview_context") return contextPreview(args.configuration ?? conversations.find((conversation) => conversation.id === args.conversationId)!.agentSnapshot.configuration);
     if (command === "get_conversation_context") { const conversation = conversations.find((conversation) => conversation.id === args.conversationId)!; return { snapshot: new URLSearchParams(location.search).get("context") === "missing" || conversation.id !== "preview-chat" ? null : structuredClone(initialContext), current: { profile: conversation.agentSnapshot, workspacePath: conversation.workspacePath, permissionMode: conversation.permissionMode, provider: conversation.provider, model: conversation.model } }; }
     if (command === "get_member_appearance") return { theme: settings.theme, accentColor: settings.accentColor };

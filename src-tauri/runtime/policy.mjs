@@ -26,13 +26,15 @@ export function applyToolPolicy(cwd, name, input, audit, profile) {
   const deny = (reason) => ({ ...audit, decision: "deny", enforcedDeny: true, reason });
   if (execution.workspaceAccess === "read_only" && ["write", "edit"].includes(name)) return deny("此组合的工作区为只读");
   const customTool = profile?.customTools?.find((tool) => tool.name === name);
-  if (customTool?.kind === "http" && execution.network === "deny") return deny("此组合禁止工具联网");
+  if ((customTool?.kind === "http" || (!customTool && ["web_search", "web_fetch", "mcp_list_tools", "mcp_call_tool", "inspect_github_skill", "install_github_skill"].includes(name))) && execution.network === "deny") return deny("此组合禁止工具联网");
   if ((name === "bash" || (customTool && customTool.kind !== "http")) && execution.backend === "local"
     && (execution.fileScope === "workspace" || execution.workspaceAccess === "read_only" || execution.network === "deny" || execution.allowedHosts.length)) return deny("本机进程无法强制这些执行边界，请使用 Windows 原生或 Docker 沙盒");
   const rule = profile?.toolPermissions?.[name];
   if (audit.decision === "deny" || rule?.mode === "deny") {
     return { ...audit, decision: "deny", enforcedDeny: true, reason: rule?.mode === "deny" ? "此组合禁止使用该工具。" : audit.reason };
   }
+  if (!customTool && ["list_installed_skills", "inspect_github_skill", "install_github_skill"].includes(name) && !profile?.skillInstallEnabled) return deny("此组合未开启对话技能管理");
+  if (!customTool && name === "install_github_skill") return { ...audit, decision: "ask", enforcedAsk: true, canRemember: false, reason: "将技能安装到所有组合共享的 Skills 目录，请确认名称、来源与版本；不执行代码，不自动启用" };
   if ((rule?.pathScope === "workspace" || execution.fileScope === "workspace") && ["read", "write", "edit", "grep", "find", "ls"].includes(name)) {
     const raw = input?.path ?? input?.file_path ?? input?.directory ?? input?.dir ?? ".";
     try {

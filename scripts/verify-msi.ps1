@@ -62,6 +62,11 @@ $required = @(
     'THIRD_PARTY_NOTICES.md',
     'pi\LICENSE',
     'node\LICENSE',
+    'runtime\node_modules\pdfjs-dist\LICENSE',
+    'runtime\node_modules\fflate\LICENSE',
+    'runtime\licenses\saxes-LICENSE',
+    'runtime\node_modules\xmlchars\LICENSE',
+    'runtime\node_modules\@napi-rs\canvas\LICENSE',
     'runtime\tao-runtime.mjs',
     'runtime\policy.mjs',
     'runtime\multi-agent.mjs',
@@ -74,10 +79,27 @@ $required = @(
     'runtime\sandbox-node.mjs',
     'runtime\sandbox-worker.mjs',
     'runtime\compaction-policy.mjs',
+    'runtime\web-tools.mjs',
+    'runtime\capability-status.mjs',
+    'runtime\docker-image.mjs',
+    'runtime\docker\image.json',
+    'runtime\docker\Dockerfile',
+    'runtime\docker\.dockerignore',
+    'runtime\docker\smoke.mjs',
+    'runtime\docker\README.md',
+    'runtime\mcp-tools.mjs',
+    'runtime\document-tools.mjs',
+    'runtime\document-worker.mjs',
+    'runtime\node_modules\pdfjs-dist\legacy\build\pdf.mjs',
+    'runtime\node_modules\pdfjs-dist\legacy\build\pdf.worker.mjs',
+    'runtime\node_modules\@napi-rs\canvas-win32-x64-msvc\skia.win32-x64-msvc.node',
+    'runtime\skills.mjs',
+    'runtime\skill-install.mjs',
     'runtime\docs\tools.md',
     'runtime\docs\collaboration.md',
     'runtime\docs\permissions.md',
     'runtime\docs\customization.md',
+    'runtime\docs\skill_install.md',
     'pi\packages\coding-agent\src\index.ts',
     'pi\node_modules\tsx\dist\preflight.cjs',
     'pi\node_modules\tsx\dist\loader.mjs',
@@ -163,7 +185,13 @@ try {
     try { $taoEmbeddedHash = ([BitConverter]::ToString($taoHasher.ComputeHash($taoEmbeddedBytes))).Replace('-', '').ToLowerInvariant() }
     finally { $taoHasher.Dispose() }
     $taoExpectedHelper = Join-Path (Split-Path -Parent $PSScriptRoot) 'src-tauri\resources\native\tao-windows-sandbox.exe'
-    if ($taoEmbeddedHash -ne (Get-FileHash -LiteralPath $taoExpectedHelper -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'MSI embedded cleanup helper differs from the verified resource' }
+    # Use the framework directly: nested Windows PowerShell may inherit a PSModulePath
+    # without Microsoft.PowerShell.Utility when launched from another PowerShell edition.
+    $taoFileHasher = [Security.Cryptography.SHA256]::Create()
+    $taoHelperStream = [IO.File]::OpenRead($taoExpectedHelper)
+    try { $taoExpectedHash = ([BitConverter]::ToString($taoFileHasher.ComputeHash($taoHelperStream))).Replace('-', '').ToLowerInvariant() }
+    finally { $taoHelperStream.Dispose(); $taoFileHasher.Dispose() }
+    if ($taoEmbeddedHash -ne $taoExpectedHash) { throw 'MSI embedded cleanup helper differs from the verified resource' }
     Write-Host "[Tao MSI] Embedded sandbox helper SHA-256: $taoEmbeddedHash"
 } finally { $view.Close() }
 

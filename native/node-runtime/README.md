@@ -37,7 +37,9 @@ timestamps. System Node and global npm installations are not changed.
 
 ## Runtime and release
 
-Development uses this verified cache. Windows native tools receive a private
+Native tool development uses this verified cache. The desktop Debug Runtime
+host still uses the configured system Node; releases use the bundled Node.
+Windows native tools receive a private
 copy under the Tao data directory; Node/npm are read-only to the tool identity.
 `npm.cmd` and `npx.cmd` resolve the adjacent private Node. Releases copy that same
 runtime into `resources/node`, using one Node binary for Runtime and tools.
@@ -58,6 +60,18 @@ node scripts/verify-runtime-tool-flow.mjs --windows
 
 These tests require the native helper and administrator compatibility preparation
 described in `native/windows-sandbox/README.md`. No MSI is built by these commands.
-The Node suite includes an esbuild full-bundling compatibility probe. That probe
-currently fails on ancestor-directory enumeration and the suite retains its
-nonzero exit code; successful child pipes and npm scripts do not hide this limit.
+The 2026-10-21 Node compatibility matrix passed 12/12, including esbuild full
+bundling and a Vite production build with TypeScript configuration. Commands
+temporarily map the workspace to an unused drive letter, avoiding host ancestor
+enumeration without granting extra file permissions. The mapping is visible in
+the current Windows logon session and is released when execution ends; it is not
+a security boundary. Later calls must use the original or relative workspace
+path, not a previous temporary drive letter.
+
+The earlier failed bundling reports remain historical evidence. This result
+does not grant online npm installation, dependencies outside the workspace,
+persistent servers, or arbitrary program compatibility. Windows 10, cross-user,
+reboot and stress validation remain pending. See the [latest compatibility
+record](../../docs/验证/2026-10-21-原生沙盒构建兼容与清理.md) and [0.2.0 release
+acceptance](../../docs/验证/2026-10-21-0.2.0发布验收.md). These are recorded results;
+the 2026-10-22 documentation cleanup did not rerun the native suites.

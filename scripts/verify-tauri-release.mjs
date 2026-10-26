@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { verifyReleaseLicenses } from "./release-licenses.mjs";
 import { verifyStaticCrt } from "./pe-imports.mjs";
+import { verifyDocumentResources } from "./verify-document-resources.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const resourceRoot = process.argv[2] === "--resource-root" && process.argv[3]
@@ -139,14 +140,14 @@ async function main() {
     [join(resourceRoot,"native","tao-windows-sandbox.exe"),"Windows 原生沙盒执行器"],
     [runtimeScript, "Tao Runtime"],
     [join(resourceRoot, "runtime", "policy.mjs"), "Tao 权限模块"],
-    ...["execution", "execution-policy", "execution-tools", "sandbox-worker", "compaction-policy", "windows-sandbox", "sandbox-node"].map((name) => [join(resourceRoot, "runtime", `${name}.mjs`), `Tao ${name}`]),
+    ...["execution", "execution-policy", "execution-tools", "sandbox-worker", "compaction-policy", "windows-sandbox", "sandbox-node", "web-tools", "skills", "skill-install", "mcp-tools", "document-tools", "document-worker", "capability-status", "docker-image"].map((name) => [join(resourceRoot, "runtime", `${name}.mjs`), `Tao ${name}`]),
     [join(resourceRoot, "node", "BUILD-MANIFEST.json"), "兼容 Node 构建清单"],
     [join(resourceRoot, "node", "npm.cmd"), "内置 npm"],
     [join(resourceRoot, "node", "npx.cmd"), "内置 npx"],
     [join(resourceRoot, "runtime", "multi-agent.mjs"), "Tao 多智能体协调器"],
     [join(resourceRoot, "runtime", "context.mjs"), "Tao 上下文模块"],
     [join(resourceRoot, "runtime", "prompt-policy.mjs"), "Tao 提示词策略"],
-    ...["tools", "collaboration", "permissions", "customization"].map((topic) => [join(resourceRoot, "runtime", "docs", `${topic}.md`), `Tao 手册 ${topic}`]),
+    ...["tools", "collaboration", "permissions", "customization", "skill_install"].map((topic) => [join(resourceRoot, "runtime", "docs", `${topic}.md`), `Tao 手册 ${topic}`]),
     [preflight, "tsx preflight"],
     [loader, "tsx loader"],
     [join(piRoot, "packages", "coding-agent", "src", "index.ts"), "Pi 入口"],
@@ -157,6 +158,12 @@ async function main() {
 
   const licenseCount = await verifyReleaseLicenses(resourceRoot);
   const manifest=JSON.parse(await readFile(join(resourceRoot,"RELEASE-MANIFEST.json"),"utf8"));
+  const recipe = JSON.parse(await readFile(join(resourceRoot, "runtime", "docker", "image.json"), "utf8"));
+  if (manifest.dockerRecipe?.image !== recipe.image || manifest.dockerRecipe?.base !== recipe.base || !/@sha256:[a-f0-9]{64}$/.test(recipe.base)) throw new Error("Docker 镜像版本或基础镜像摘要不一致");
+  for (const file of ["image.json", "Dockerfile", ".dockerignore", "smoke.mjs"]) {
+    if (manifest.dockerRecipe.files?.find((item) => item.file === file)?.sha256 !== createHash("sha256").update(await readFile(join(resourceRoot, "runtime", "docker", file))).digest("hex")) throw new Error(`Docker 配方校验失败：${file}`);
+  }
+  log(`Docker 镜像 ${recipe.image} 随包配方及固定基础镜像摘要验证通过（不代表本机 Docker 已准备）`);
   const nodeBuild=JSON.parse(await readFile(join(resourceRoot,"node","BUILD-MANIFEST.json"),"utf8"));
   if(JSON.stringify(nodeBuild)!==JSON.stringify(manifest.nodeBuild)||manifest.nodeVersion!==nodeBuild.nodeVersion)throw new Error("Node 构建信息与发布清单不一致");
   const nodeModule=await import(pathToFileURL(join(resourceRoot,"runtime","sandbox-node.mjs")).href);
@@ -171,6 +178,8 @@ async function main() {
   if(JSON.parse(nativeProbe.stdout).capability!=="Tao.WindowsSandbox.Compatibility.v1") throw new Error("原生执行器版本不匹配");
   log(`原生执行器 SHA-256、静态 CRT 与只读探测通过（${nativeImports.length} 项系统 DLL 导入）；此探测不初始化系统权限`);
   log(`${licenseCount} 份许可声明完整，SHA-256 与发布清单一致`);
+  await verifyDocumentResources(resourceRoot);
+  log("内置 Node + 随包 PDF/DOCX 解析与原生依赖静态 CRT 验证通过");
 
   const modelData = join(piRoot, "packages", "ai", "src", "providers", "data");
   const modelFiles = (await readdir(modelData)).filter((name) => name.endsWith(".json"));

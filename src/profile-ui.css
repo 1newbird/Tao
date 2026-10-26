@@ -206,6 +206,7 @@
 .profile-save-actions .primary-button { height: 34px; padding: 0 13px; border-radius: 7px; font-size: 12px; }
 .profile-save-actions .secondary-button span { margin-left: 4px; font-size: 11px; }
 .customization-content .customization-block { padding: 20px; border-color: var(--profile-edge); border-radius: 9px; background: var(--profile-surface); }
+.customization-content .customization-block-heading strong { color: var(--profile-text); }
 .customization-content .custom-tool-card { border-color: var(--profile-edge); border-radius: 8px; }
 .customization-content .custom-tool-card-header { border-color: var(--profile-edge); background: var(--profile-wash); }
 .customization-content .custom-tool-card:not(.expanded) .custom-tool-card-header { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; background: transparent; }
@@ -252,3 +253,91 @@
 .delegation-profiles label { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; }
 .delegation-profiles label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delegation-hint { color: var(--profile-muted); font-size: 12px; line-height: 1.7; }
+.skills-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.skills-toolbar label { display: flex; align-items: center; gap: 8px; }
+.skills-toolbar .secondary-button { color: var(--profile-text); background: var(--profile-wash); border-color: var(--profile-edge); }
+.customization-content .web-settings .secondary-button { color: var(--profile-text); background: var(--profile-wash); border-color: var(--profile-edge); }
+.skill-path-card .skill-path-label { color: var(--profile-muted); }
+.skills-toolbar select, .composer-skill-picker select { height: 34px; padding: 0 8px; border: 1px solid var(--profile-edge); border-radius: 7px; color: var(--profile-text); background: var(--profile-wash); font: inherit; }
+.skills-list { display: grid; gap: 12px; }
+.skill-item { display: flex; gap: 12px; padding: 16px; border: 1px solid var(--profile-edge); border-radius: 12px; }
+.skill-item > input { flex: 0 0 auto; align-self: flex-start; margin-top: 4px; }
+.skill-item > span { min-width: 0; }
+.skill-item p { margin: 6px 0; }
+.skill-item small, .skills-diagnostics small { display: block; margin-top: 6px; overflow-wrap: anywhere; color: var(--profile-muted); }
+.skill-item code, .skill-path-card code { overflow-wrap: anywhere; }
+.skills-diagnostics { padding: 12px; border: 1px solid var(--profile-edge); border-radius: 12px; }
+.mcp-server-editor { border-top: 1px solid var(--profile-edge); padding-top: 16px; margin-top: 16px; display: grid; gap: 12px; min-width: 0; }
+.customization-content .mcp-settings .secondary-button { color: var(--profile-text); background: var(--profile-wash); border-color: var(--profile-edge); }
+.mcp-server-editor > .secondary-button { justify-self: start; }
+.mcp-tool-list { max-height: 420px; overflow: auto; min-width: 0; }
+.mcp-tool-item { padding: 8px 0; min-width: 0; }
+.mcp-tool-item .tool-option span, .mcp-server-editor .tool-option span { min-width: 0; overflow-wrap: anywhere; }
+.mcp-tool-item details { margin: 4px 0 0 28px; font-size: 12px; }
+.mcp-tool-item pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+.github-skill-installer { display: grid; gap: 12px; min-width: 0; }
+.app-shell .customization-content .github-skill-installer .secondary-button,
+.app-shell .customization-content .github-skill-installer .secondary-button:hover:not(:disabled) { color: var(--profile-text); background: var(--profile-wash); border-color: var(--profile-edge); }
+.github-skill-installer p { margin: 0; }
+.github-skill-installer summary { cursor: pointer; }
+.github-skill-preview { display: grid; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.github-skill-preview dl { margin: 0; display: grid; gap: 5px; }
+.github-skill-preview dt { font-weight: 600; }
+.github-skill-preview dd { margin: 0 0 7px; overflow-wrap: anywhere; }
+.github-skill-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; font-size: 12px; }
+.github-skill-preview ul, .github-skill-candidates { max-height: 240px; overflow: auto; }
+.github-skill-candidates { display: grid; gap: 6px; }
+.github-skill-candidates button { text-align: left; overflow-wrap: anywhere; }
+
+/* Capability pages keep summaries visible and technical detail on demand. */
+.capability-page-heading, .capability-panel-heading, .service-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.capability-page-heading > div { min-width: 0; }
+.capability-page-heading > button { flex: none; }
+.app-shell .customization-content .capability-page-heading .secondary-button,
+.app-shell .customization-content .skill-add-panel .secondary-button,
+.app-shell .profile-save-actions .secondary-button { color: var(--profile-text); background: var(--profile-wash); border-color: var(--profile-edge); }
+.capability-page-heading h2 { margin-top: 0; }
+.web-capability-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.web-capability-card, .mcp-service-card, .skill-library-item { min-width: 0; padding: 16px; border: 1px solid var(--profile-edge); border-radius: 10px; background: var(--profile-surface); }
+.web-capability-card > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+.web-capability-card strong, .service-card-heading strong { font-size: 13px; color: var(--profile-text); }
+.web-capability-card p, .capability-empty p { font-size: 12px; line-height: 1.7; color: var(--profile-muted); overflow-wrap: anywhere; }
+.web-capability-card .text-button { padding: 0; font-size: 12px; }
+.capability-state { font-size: 11px; color: var(--profile-muted); }
+.capability-state.enabled { color: var(--tao-accent-strong); }
+.capability-state.blocked, .capability-state.missing { color: #a86b26; }
+.theme-dark .capability-state.blocked, .theme-dark .capability-state.missing { color: #e4b66e; }
+.connection-result { padding: 12px 14px; border: 1px solid var(--profile-edge); border-radius: 8px; background: var(--profile-wash); color: var(--profile-text); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.connection-result p { margin: 6px 0; }
+.connection-result.success { border-color: var(--tao-accent-line); }
+.capability-details { margin-top: 18px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.capability-details summary, .mcp-service-card summary, .skill-library-item summary { cursor: pointer; color: var(--profile-muted); font-size: 12px; }
+.capability-details code { display: block; margin-top: 12px; }
+.capability-empty { padding: 30px 20px; border: 1px dashed var(--profile-edge); border-radius: 10px; text-align: center; color: var(--profile-text); }
+.mcp-service-card { margin: 16px 0; }
+.service-address { margin: 8px 0; font-size: 12px; color: var(--profile-muted); overflow-wrap: anywhere; }
+.service-authorization { margin: 12px 0; font-size: 12px; color: var(--profile-text); }
+.mcp-service-card .mcp-server-editor { margin-top: 12px; }
+.service-remove { justify-self: start; }
+.skill-add-panel { padding: 18px; margin-bottom: 22px; border: 1px solid var(--profile-edge); border-radius: 10px; background: var(--profile-wash); }
+.skill-add-panel .github-skill-installer { margin: 16px 0 0; padding: 0; border: 0; box-shadow: none; background: transparent; }
+.skill-add-panel .github-skill-installer h3 { margin: 8px 0; font-size: 15px; }
+.skill-add-panel .github-skill-installer > p { font-size: 12px; line-height: 1.7; }
+.skill-library-item .skill-item { padding: 0; border: 0; border-radius: 0; }
+.skill-library-item .skill-item p { font-size: 12px; line-height: 1.7; }
+.skill-library-item details { margin: 12px 0 0 25px; font-size: 12px; overflow-wrap: anywhere; }
+.skill-library-item details code { display: block; margin-top: 10px; }
+.skills-toolbar { margin: 14px 0 18px; }
+.capability-menu { position: relative; flex: none; }
+.capability-popover { position: absolute; right: 0; top: calc(100% + 12px); width: min(390px, calc(100vw - 32px)); max-height: min(680px, calc(100vh - 100px)); overflow-y: auto; padding: 18px; border: 1px solid var(--profile-edge); border-radius: 12px; background: var(--profile-surface); color: var(--profile-text); box-shadow: 0 12px 40px #0002; z-index: 70; }
+.capability-popover .web-capability-cards { grid-template-columns: 1fr; }
+.capability-panel-heading > strong { font-size: 14px; }
+.capability-caption { margin: 10px 0; color: var(--profile-muted); font-size: 12px; line-height: 1.7; }
+.capability-link-row { display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 12px 0; border: 0; border-top: 1px solid var(--profile-edge); background: transparent; color: var(--profile-text); text-align: left; font-size: 12px; cursor: pointer; }
+.capability-link-row span { color: var(--profile-muted); }
+@media (max-width: 1050px) { .web-capability-cards { grid-template-columns: 1fr; } }
+@media (max-width: 700px) {
+  .capability-popover { position: fixed; top: 75px; right: 16px; }
+  .capability-page-heading { align-items: flex-start; flex-wrap: wrap; }
+  .capability-page-heading h2 { font-size: 19px; }
+}

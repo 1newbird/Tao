@@ -44,11 +44,11 @@ export function resolveDelegation(profile = {}, profiles = [], agentInfo) {
   return { profile: { ...profile, delegation: { ...options, allowedProfileIds: [DEFAULT_WORKER_ID] } }, profiles: [worker] };
 }
 
-export const TAO_DOC_TOPICS = Object.freeze({ tools: "工具选择与文件操作", collaboration: "多智能体通信与任务板", permissions: "授权与执行边界", customization: "组合、Skills 与扩展" });
+export const TAO_DOC_TOPICS = Object.freeze({ tools: "工具选择与文件操作", collaboration: "多智能体通信与任务板", permissions: "授权与执行边界", customization: "组合、Skills 与扩展", skill_install: "从 GitHub 安装技能" });
 
 export function createDocumentationTool(defineTool) {
   return defineTool({ name: DOCS_TOOL_NAME, label: "Tao 运行手册", promptSnippet: "按专题查阅 Tao 运行手册",
-    description: "按需读取 Tao 内置运行说明；tools=工具使用，collaboration=委派/通信/任务板，permissions=权限边界，customization=组合/Skills/扩展。不执行操作、不读取用户配置、不授予权限。",
+    description: "按需读取 Tao 内置运行说明；tools=工具使用，collaboration=委派/通信/任务板，permissions=权限边界，customization=组合/Skills/扩展，skill_install=GitHub 技能安装。不执行操作、不读取用户配置、不授予权限。",
     parameters: { type: "object", properties: { topic: { type: "string", enum: Object.keys(TAO_DOC_TOPICS) } }, required: ["topic"], additionalProperties: false },
     execute: async (_id, params, signal) => {
       signal?.throwIfAborted();

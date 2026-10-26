@@ -1,4 +1,4 @@
-import { CSSProperties, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -8,8 +8,12 @@ import { catalogWithEditor, editorConfiguration, emptyConfiguration, exportProfi
 import type { AgentCatalog, AgentProfile, AgentSnapshot, CustomToolConfiguration, CustomToolPermissionMode, RuntimeConfiguration, ToolPermissionConfiguration } from "./agent-profiles";
 import { AgentIcon, ConversationProfileMenu, ProfileActionMenu } from "./ProfileMenu";
 import { DelegationSettings } from "./DelegationSettings";
-import { ExecutionSettings } from "./ExecutionSettings";
+const ExecutionSettings = lazy(() => import("./ExecutionSettings").then((module) => ({ default: module.ExecutionSettings })));
 import { CompactionSettings } from "./CompactionSettings";
+const WebSettings = lazy(() => import("./WebSettings").then((module) => ({ default: module.WebSettings })));
+import { CapabilitySummary } from "./CapabilitySummary";
+const McpSettings = lazy(() => import("./McpSettings").then((module) => ({ default: module.McpSettings })));
+import { SkillsSettings, SkillComposer } from "./SkillsSettings";
 import { CollaborationBoard } from "./CollaborationBoard";
 import { CollaborationWorkspace } from "./CollaborationWorkspace";
 import { ContextPanel, ContextPreview } from "./ContextPanel";
@@ -246,7 +250,7 @@ interface PermissionPrompt {
 type QueueBehavior = "steer" | "follow_up";
 type ExportFormat = "markdown" | "json" | "text";
 type MainView = "chat" | "customization" | "settings";
-type CustomizationSection = "overview" | "prompt" | "context" | "execution" | "session" | "agent" | "skills" | "extensions";
+type CustomizationSection = "overview" | "prompt" | "context" | "execution" | "agent" | "skills" | "web" | "mcp";
 type SettingsSection = "models" | "appearance" | "language" | "data" | "runtime" | "about" | "help";
 type AccentColor = "tao" | "developer" | "ocean" | "amber" | "graphite";
 type ThemeMode = "light" | "dark" | "system";
@@ -1260,6 +1264,27 @@ function App() {
   const chatScroll = useFollowScroll(activeId, mainView === "chat" && !loading);
   const workScroll = useFollowScroll(`${activeId}:${mainView}`, runtimeOpen && rightPanelView === "runtime");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const resizeComposerInput = useCallback(() => {
+    const textarea = composerInputRef.current;
+    if (!textarea || !textarea.clientWidth) return;
+    // Reset first so deleting text also shrinks the input. CSS owns the cap.
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, []);
+  useLayoutEffect(resizeComposerInput, [input, mainView, resizeComposerInput]);
+  useLayoutEffect(() => {
+    const textarea = composerInputRef.current;
+    if (!textarea) return;
+    let previousWidth = 0;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === previousWidth) return;
+      previousWidth = entry.contentRect.width;
+      resizeComposerInput();
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+  }, [mainView, resizeComposerInput]);
   const resizeRef = useRef<{ side: "sidebar" | "runtime" | "directory"; startX: number; startWidth: number; pointerId: number; target: HTMLDivElement } | null>(null);
 
   useEffect(() => {
@@ -3496,9 +3521,16 @@ function App() {
                     : preparingIds[activeId]
                       ? "后台连接中 · 可输入"
                       : runtimeHost.ready
-                        ? "可用"
+                        ? "运行就绪"
                         : "Runtime 启动中 · 可输入"}
                 </span>
+              )}
+              {mainView === "chat" && activeConversation && (
+                <CapabilitySummary key={`${activeId}:${activeConversation.agentSnapshot?.profileId}:${activeConversation.agentSnapshot?.revision}`} conversationId={activeId} configuration={activeConversation.agentSnapshot?.configuration} onConfigure={(section) => {
+                  const id = activeConversation.agentSnapshot?.profileId;
+                  if (id && editedCatalog.profiles.some((profile) => profile.id === id)) selectEditorProfile(id);
+                  setMainView("customization"); setCustomizationSection(section);
+                }} />
               )}
               {mainView === "chat" && activeConversation && (
                 <div className="export-menu">
@@ -3760,6 +3792,7 @@ function App() {
               </div>
             )}
             <textarea
+              ref={composerInputRef}
               aria-label="消息"
               disabled={loading}
               onChange={(event) => setInput(event.currentTarget.value)}
@@ -3768,6 +3801,32 @@ function App() {
               rows={1}
               value={input}
             />
+            {activeConversation?.agentSnapshot?.configuration.skillsEnabled && <SkillComposer key={activeId} conversationId={activeId} onSelect={(name) => { setInput((text) => `/skill:${name} ${text.replace(/^\/skill:[^\s]+\s*/, "")}`); composerInputRef.current?.focus(); }} />}
+            {canAppendToActive && input.trim() && (
+              <div className="composer-append-options" role="group" aria-label="追加方式">
+                <span aria-hidden="true">追加方式</span>
+                <label title="在下一次模型调用前补充要求">
+                  <input
+                    type="radio"
+                    name="queueBehavior"
+                    value="steer"
+                    checked={queueBehavior === "steer"}
+                    onChange={() => setQueueBehavior("steer")}
+                  />
+                  立即调整
+                </label>
+                <label title="当前回答结束后再继续">
+                  <input
+                    type="radio"
+                    name="queueBehavior"
+                    value="follow_up"
+                    checked={queueBehavior === "follow_up"}
+                    onChange={() => setQueueBehavior("follow_up")}
+                  />
+                  回答后继续
+                </label>
+              </div>
+            )}
             <div className="composer-footer">
               <div className="composer-left-controls">
                 <button
@@ -3775,7 +3834,7 @@ function App() {
                   type="button"
                   disabled={!activeConversation || activeConversationGenerating || Boolean(preparingIds[activeId])}
                   aria-label="添加附件"
-                  title="添加附件（文本、Markdown、代码和配置文件）"
+                    title="添加附件（PDF、Word DOCX、文本和代码；扫描件暂不支持识别）"
                   onClick={() => void chooseMessageAttachments()}
                 >
                   <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.2 10.8 4.9-4.9a2.6 2.6 0 0 1 3.7 3.7l-6.9 6.9a4 4 0 0 1-5.7-5.7l7-7" /><path d="m7.4 12.6 5.4-5.4" /></svg>
@@ -3876,16 +3935,6 @@ function App() {
                     </div>
                   )}
                 </div>
-                {canAppendToActive && (
-                  <select
-                    aria-label="追加方式"
-                    value={queueBehavior}
-                    onChange={(event) => setQueueBehavior(event.currentTarget.value as QueueBehavior)}
-                  >
-                    <option value="steer">立即调整</option>
-                    <option value="follow_up">回答后继续</option>
-                  </select>
-                )}
                 {canAppendToActive && input.trim() && (
                   <button className="queue-submit" type="submit" aria-label="追加消息" title="追加消息">
                     ↑
@@ -3932,14 +3981,14 @@ function App() {
                   ["overview", "组合设置"],
                   ["prompt", "系统提示词"],
                   ["agent", "工具与权限"],
+                  ["web", "联网检索"],
+                  ["mcp", "外部服务 · MCP"],
+                  ["skills", "技能 · Skills"],
                   ["execution", "执行与沙盒"],
-                  ["skills", "Skills"],
                   ["context", "上下文策略"],
-                  ["session", "会话策略"],
-                  ["extensions", "Extension"],
                 ] as Array<[CustomizationSection, string]>).map(([section, label]) => (
                   <button className={customizationSection === section ? "active" : ""} key={section} type="button" aria-current={customizationSection === section ? "page" : undefined} onClick={() => setCustomizationSection(section)}>
-                    <span>{label}</span>{!(["overview", "prompt", "agent", "skills", "execution", "context"] as CustomizationSection[]).includes(section) && <small>规划中</small>}
+                    <span>{label}</span>
                   </button>
                 ))}
               </nav>
@@ -3991,7 +4040,9 @@ function App() {
                     <div className="capability-grid">
                       <button type="button" onClick={() => setCustomizationSection("prompt")}><span className="capability-number">01</span><div><strong>系统提示词</strong><p>{runtimeDraft.enabled && runtimeDraft.systemPrompt ? "已配置，点击编辑提示词" : "设置角色、表达方式与行为约束"}</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
                       <button type="button" onClick={() => setCustomizationSection("agent")}><span className="capability-number">02</span><div><strong>工具与权限</strong><p>{runtimeDraft.toolMode === "default" ? "默认工具组合" : `${runtimeDraft.enabledTools.length + runtimeDraft.customTools.filter((tool) => tool.enabled).length} 个工具已选`} · 配置工具及访问范围</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
-                      <button type="button" onClick={() => setCustomizationSection("skills")}><span className="capability-number">03</span><div><strong>Skills</strong><p>{runtimeDraft.skillsEnabled ? "已启用 Tao Skills" : "加载可复用的能力说明"}</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                      <button type="button" onClick={() => setCustomizationSection("web")}><span className="capability-number">03</span><div><strong>联网检索</strong><p>分别配置搜索服务与公开网页读取</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                      <button type="button" onClick={() => setCustomizationSection("mcp")}><span className="capability-number">04</span><div><strong>外部服务 · MCP</strong><p>{runtimeDraft.mcpServers?.length ?? 0} 个服务配置 · 连接与工具授权</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
+                      <button type="button" onClick={() => setCustomizationSection("skills")}><span className="capability-number">05</span><div><strong>技能 · Skills</strong><p>{runtimeDraft.skillsEnabled ? "已启用 Tao Skills" : "加载可复用的能力说明"}</p></div><span className="capability-arrow" aria-hidden="true">↗</span></button>
                     </div>
                   </section>
                 </div>
@@ -4328,7 +4379,7 @@ function App() {
                     )}
                   </div>
                   <div className="customization-block"><div className="customization-block-heading"><div><strong>当前组合的工具权限</strong><span>禁止优先；文件范围规则适用于内置文件工具，命令执行仍需按工具审核。</span></div><button type="button" className="guide-link" onClick={() => { setHelpTopic(2); setSettingsSection("help"); setMainView("settings"); }}>了解权限边界 →</button></div><div className="tool-permission-list">
-                    {[...BUILTIN_TOOL_OPTIONS.map(([name, label]) => ({ name, label })), ...runtimeDraft.customTools.filter((tool) => tool.enabled).map((tool) => ({ name: tool.name, label: tool.label || tool.name }))].map(({ name, label }) => {
+                    {[...BUILTIN_TOOL_OPTIONS.map(([name, label]) => ({ name, label })), { name: "web_search", label: "联网搜索" }, { name: "web_fetch", label: "读取网页" }, { name: "mcp_list_tools", label: "查看 MCP 工具" }, { name: "mcp_call_tool", label: "调用 MCP 工具" }, ...runtimeDraft.customTools.filter((tool) => tool.enabled).map((tool) => ({ name: tool.name, label: tool.label || tool.name }))].map(({ name, label }) => {
                       const rule = runtimeDraft.toolPermissions?.[name] ?? { mode: "inherit", pathScope: "any" };
                       return <div className="tool-permission-row" key={name}><span>{label}<small>{name}</small></span><select aria-label={`${label}权限`} value={rule.mode} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, mode: event.currentTarget.value as ToolPermissionConfiguration["mode"] } } })}><option value="inherit">继承默认审核</option><option value="ask">询问确认</option><option value="allow">自动允许</option><option value="deny">禁止执行</option></select>{["read", "write", "edit", "grep", "find", "ls"].includes(name) && <select aria-label={`${label}文件范围`} value={rule.pathScope} onChange={(event) => updateRuntimeDraft({ toolPermissions: { ...runtimeDraft.toolPermissions, [name]: { ...rule, pathScope: event.currentTarget.value as ToolPermissionConfiguration["pathScope"] } } })}><option value="any">工作区外按审核规则处理</option><option value="workspace">仅当前工作区</option></select>}</div>;
                     })}
@@ -4336,32 +4387,12 @@ function App() {
                 </div>
               )}
               {customizationSection === "skills" && (
-                <div className="workspace-section form-section">
-                  <div className="workspace-heading">
-                    <span className="eyebrow">Skills</span>
-                    <h2>Tao Skills</h2>
-                    <p>Skills 是放在 Tao 产品数据目录中的可组合能力说明。每个 Skill 使用一个目录，并在目录中放置 SKILL.md。</p>
-                  </div>
-                  <label className="setting-row inline-setting">
-                    <span><strong>启用 Tao Skills</strong><small>启用后，Runtime 会从下面的目录发现并加载 Skills。</small></span>
-                    <input checked={runtimeDraft.skillsEnabled} type="checkbox" onChange={(event) => updateRuntimeDraft({ skillsEnabled: event.currentTarget.checked })} />
-                  </label>
-                  <div className="settings-card skill-path-card">
-                    <span className="skill-path-label">Skills 目录</span>
-                    <code>%USERPROFILE%\.tao\skills</code>
-                    <p>这是 Tao 的统一目录。每个组合可独立决定是否加载目录中的 Skill。</p>
-                  </div>
-                </div>
+                <SkillsSettings key={selectedProfileId} configuration={runtimeDraft} onChange={updateRuntimeDraft} />
               )}
-              {customizationSection === "execution" && <ExecutionSettings key={selectedProfileId} value={runtimeDraft.execution} onChange={(execution) => updateRuntimeDraft({ execution })} />}
+              {customizationSection === "web" && <Suspense fallback={<p role="status">正在加载联网设置…</p>}><WebSettings key={selectedProfileId} configuration={runtimeDraft} onChange={updateRuntimeDraft} onConfigure={setCustomizationSection} /></Suspense>}
+              {customizationSection === "mcp" && <Suspense fallback={<p role="status">正在加载 MCP 设置…</p>}><McpSettings key={selectedProfileId} configuration={runtimeDraft} onChange={updateRuntimeDraft} /></Suspense>}
+              {customizationSection === "execution" && <Suspense fallback={<p role="status">正在加载执行设置…</p>}><ExecutionSettings key={selectedProfileId} value={runtimeDraft.execution} onChange={(execution) => updateRuntimeDraft({ execution })} /></Suspense>}
               {customizationSection === "context" && <CompactionSettings value={runtimeDraft.compaction} onChange={(compaction) => updateRuntimeDraft({ compaction })} />}
-              {(["session", "extensions"] as CustomizationSection[]).includes(customizationSection) && (
-                <div className="workspace-section placeholder-section">
-                  <div className="placeholder-icon">◇</div>
-                  <h2>{customizationSection === "session" ? "会话策略" : "Extension"}</h2>
-                  <p>页面入口已经预留，后续会在明确配置边界后接入。</p>
-                </div>
-              )}
               </div>
               <footer className="profile-save-bar">
                 <div className={`profile-save-state ${catalogDirty ? "dirty" : ""}`} role="status"><span className="profile-save-dot" /><div><strong>{catalogSaving ? "正在保存…" : catalogDirty ? "有未保存的更改" : "所有更改已保存"}</strong><small>已有会话保留原版本</small></div></div>

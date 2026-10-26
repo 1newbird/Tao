@@ -78,6 +78,9 @@ async function prepareResources() {
   const piNodeModules = join(piRoot, "node_modules");
 
   await ensureFile(runtimeScript, "Tao Runtime 脚本");
+  for (const file of ["pdfjs-dist/legacy/build/pdf.mjs", "pdfjs-dist/legacy/build/pdf.worker.mjs", "fflate/package.json", "saxes/package.json", "xmlchars/package.json", "@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node"]) {
+    await ensureFile(join(projectRoot, "src-tauri", "runtime", "node_modules", file), "文档解析依赖（请执行 npm ci --prefix src-tauri/runtime --ignore-scripts）");
+  }
   await ensureFile(join(piRoot, "packages", "coding-agent", "src", "index.ts"), "Pi coding-agent 源码");
   await ensureFile(join(piNodeModules, "tsx", "dist", "preflight.cjs"), "Pi tsx runtime");
   await ensureFile(join(piNodeModules, "tsx", "dist", "loader.mjs"), "Pi tsx loader");
@@ -117,6 +120,8 @@ async function prepareResources() {
   await execFileAsync("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",join(projectRoot,"scripts","build-windows-sandbox.ps1"),"-Release"],{cwd:projectRoot,windowsHide:true,timeout:120000});
   const nativeSandbox = { file:"native/tao-windows-sandbox.exe", sha256:createHash("sha256").update(await readFile(join(resourceRoot,"native","tao-windows-sandbox.exe"))).digest("hex"), stage:"preview" };
   const licenses = await copyReleaseLicenses({ projectRoot, nodeExtractRoot, resourceRoot });
+  const dockerRecipe = { ...JSON.parse(await readFile(join(resourceRoot, "runtime", "docker", "image.json"), "utf8")), files: [] };
+  for (const file of ["image.json", "Dockerfile", ".dockerignore", "smoke.mjs"]) dockerRecipe.files.push({ file, sha256: createHash("sha256").update(await readFile(join(resourceRoot, "runtime", "docker", file))).digest("hex") });
   await writeFile(
     join(resourceRoot, "RELEASE-MANIFEST.json"),
     `${JSON.stringify({
@@ -127,6 +132,7 @@ async function prepareResources() {
       taoLicense: "PolyForm-Noncommercial-1.0.0",
       licenses,
       nativeSandbox,
+      dockerRecipe,
       generatedAt: new Date().toISOString(),
     }, null, 2)}\n`,
     "utf8",
