@@ -1088,6 +1088,7 @@ button {
 }
 
 .message.user .message-body {
+  position: relative;
   grid-column: 1;
   grid-row: 1;
   justify-self: end;
@@ -1299,8 +1300,18 @@ button {
 }
 
 .message.user .message-copy-button {
-  display: block;
-  margin-left: auto;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  margin: 0;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.message.user:hover .message-copy-button,
+.message.user:focus-within .message-copy-button {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .message-body:hover .message-copy-button,
